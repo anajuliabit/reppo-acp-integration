@@ -1,0 +1,30 @@
+{
+  "name": "reppo-acp-agent",
+  "version": "0.1.0",
+  "description": "ACP v2 agent that accepts jobs from AI agents, fetches X post content, mints pods on Base, and submits metadata to Reppo",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/src/index.js",
+    "test": "vitest run --dir src"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "author": "anajuliabit",
+  "license": "MIT",
+  "dependencies": {
+    "@virtuals-protocol/acp-node": "^0.3.0-beta.22",
+    "dotenv": "^17.2.3",
+    "twitter-api-v2": "^1.19.0",
+    "viem": "^2.45.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "type": "module"
+}

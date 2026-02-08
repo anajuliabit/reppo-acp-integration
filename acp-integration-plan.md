@@ -2,7 +2,7 @@
 
 ## Context
 
-A **new standalone Node.js service** that bridges Virtuals Protocol's ACP (Agent Commerce Protocol) v2 with Reppo. It registers on ACP as a provider under the **@reppodant** identity, listens for incoming jobs from other AI agents and direct user interactions, and fulfills them by publishing to Moltbook + minting pods on Base + submitting metadata to Reppo's API.
+A **new standalone Node.js service** that bridges Virtuals Protocol's ACP (Agent Commerce Protocol) v2 with Reppo. It registers on ACP as a provider under the **@reppodant** identity, monitors X for mentions, and when a user replies to a post tagging @reppodant, the agent grabs the parent post's content, mints a pod on Base, and submits metadata to Reppo's API.
 
 This is a **separate project** from `reppo-agent-publisher`. It interacts with Reppo purely via REST API, fully decoupled.
 
@@ -18,42 +18,42 @@ The ACP agent allows external agents and users to publish arbitrary content. Ass
 
 Users and agents can interact with @reppodant through two paths:
 
-1. **Via Butler** (primary) — Butler orchestrates transactions and routes ACP jobs to this service. Most programmatic agent-to-agent interactions flow through Butler.
-2. **Direct @reppodant tag on X** — Users can tag @reppodant in a post to request publishing/minting. The service monitors mentions and converts them into ACP-compatible job flows.
+1. **Direct @reppodant mention on X** (primary) — A user replies to any post on X tagging @reppodant. The agent fetches the parent post's content (text, images, metadata), mints a pod, and replies with the result.
+2. **Via Butler / ACP** — Other AI agents in the Virtuals ecosystem can request publishing through ACP jobs routed by Butler. The agent extracts the X post URL from the job payload, fetches the content, and processes it the same way.
 
 ---
 
 ## What the Service Does
 
 ```
-                    ┌──────────────────────┐
-                    │  X user tags          │
-                    │  @reppodant in post   │
-                    └──────────┬───────────┘
-                               │
-                               v
-Other AI Agents ──────> ┌─────────────┐
-(Virtuals ecosystem)    │   Butler    │
-       |                │  (router)   │
-       | ACP job        └──────┬──────┘
-       | request               │
-       v                       v
-┌──────────────────────────────────────┐
-│   reppo-acp-agent (this project)     │
-│   Identity: @reppodant               │
-│                                      │
-│  1. Accept ACP job / parse mention   │
-│  2. POST to Moltbook API            │
-│  3. Mint pod on Base (on-chain)      │
-│  4. POST metadata to Reppo API       │
-│  5. Deliver result via ACP           │
-│  6. Reply on X via @reppodant        │
-└──────────────────────────────────────┘
-       |
-       | ACP deliverable: {moltbookUrl, txHash, podId}
+  X post (original content)
+       │
+       │  User replies: "@reppodant"
+       │
        v
-  Buyer agent receives result, USDC escrow released
-  (or user gets @reppodant reply with links)
+┌──────────────────────┐        Other AI Agents
+│  @reppodant mention  │        (Virtuals ecosystem)
+│  detected on X       │               │
+└──────────┬───────────┘               │ ACP job with X post URL
+           │                           │
+           v                           v
+┌──────────────────────────────────────────┐
+│   reppo-acp-agent (this project)         │
+│   Identity: @reppodant                   │
+│                                          │
+│  1. Detect mention / accept ACP job      │
+│  2. Fetch parent post content via X API  │
+│     (text, images, author, metadata)     │
+│  3. Mint pod on Base (on-chain)          │
+│  4. POST metadata to Reppo API           │
+│  5. Reply on X via @reppodant with links │
+│  6. Deliver result via ACP (if ACP job)  │
+└──────────────────────────────────────────┘
+       │
+       │ @reppodant reply: "Pod minted! 🔗 reppo.ai/pod/123 | basescan.org/tx/0x..."
+       │ ACP deliverable: {postUrl, txHash, podId, basescanUrl}
+       v
+  User sees reply on X / Buyer agent gets ACP result
 ```
 
 ## External Interfaces
@@ -63,15 +63,11 @@ Other AI Agents ──────> ┌─────────────�
 - `POST /agents/{agentId}/pods` — submit pod metadata after on-chain mint
 - Auth: `Authorization: Bearer <accessToken>`
 
-### Moltbook API (`https://www.moltbook.com/api/v1`)
-- `POST /posts` — publish content, returns `{id, url}`
-- Auth: `Authorization: Bearer <moltbookKey>`
-
 ### X / Twitter API (via @reppodant)
-- Monitor mentions of @reppodant for direct user requests
-- Reply to users with publish/mint results (moltbook URL, basescan link)
+- Monitor mentions of @reppodant (filtered stream or polling)
+- Fetch parent post content: `GET /2/tweets/:id` with `tweet.fields=text,author_id,attachments,created_at` and `expansions=attachments.media_keys,author_id`
+- Reply to users with mint results (Reppo pod URL, basescan link)
 - Auth: OAuth 2.0 credentials for the @reppodant account
-- Butler handles routing for most interactions; direct mention monitoring is supplementary
 
 ### On-chain (Base, chainId 8453)
 - PodManager (`0xcfF0511089D0Fbe92E1788E4aFFF3E7930b3D47c`): `mintPod(to, emissionSharePercent)`
@@ -176,15 +172,12 @@ reppo-acp-agent/
     index.ts              # Entry point — init ACP client + mention listener, start service
     config.ts             # Load env vars, validate config
     acp.ts                # ACP client init, job lifecycle handlers
-    butler.ts             # Butler integration — receives routed jobs from Butler
-    twitter.ts            # X API client — monitor @reppodant mentions, reply with results
+    twitter.ts            # X API client — monitor @reppodant mentions, fetch posts, reply
     reppo.ts              # Reppo API client (register, submit metadata)
-    moltbook.ts           # Moltbook API client (post content)
     chain.ts              # Viem clients, mintPod, approve REPPO
     handlers/
-      publish.ts          # Handle "publish" job: moltbook + mint + metadata
-      mint.ts             # Handle "mint" job: mint + metadata
-      mention.ts          # Handle direct @reppodant mention → parse intent → route to publish/mint
+      mention.ts          # Handle @reppodant mention → fetch parent post → mint → reply
+      acpJob.ts           # Handle ACP job → extract X post URL → fetch → mint → deliver
     types.ts              # Shared types
 ```
 
@@ -192,7 +185,7 @@ reppo-acp-agent/
 
 - `@virtuals-protocol/acp-node` — ACP v2 SDK
 - `viem` — Base chain interaction
-- `twitter-api-v2` — X API client for @reppodant mentions & replies
+- `twitter-api-v2` — X API client for @reppodant (mentions, fetch posts, reply)
 - `dotenv` — environment config
 
 ---
@@ -204,39 +197,39 @@ reppo-acp-agent/
 2. Register with Reppo API if no session exists (one-time)
 3. Init ACP client with `onNewTask` and `onEvaluate` callbacks
 4. Init @reppodant X mention listener (filtered stream or polling)
-5. Start polling loop for TRANSACTION-phase jobs
+5. Start polling loop for ACP jobs + mention checks
 6. Log readiness
 
-### Job Handler (`src/handlers/publish.ts`)
-When a "Reppodant Content Publish" job reaches TRANSACTION phase:
-1. Parse requirements from job (`title`, `body`, `sourceUrl?`, `imageURL?`, `submolt?`)
-2. POST to Moltbook API → get `{id, url}`
-3. Approve REPPO spend if needed → `reppo.approve(podManager, publishingFee)`
-4. Call `podManager.mintPod(address, 50)` → get `txHash`, `podId`
-5. POST metadata to Reppo API (`/agents/{agentId}/pods`)
-6. Call `job.deliver({moltbookUrl, txHash, podId, basescanUrl})`
-7. If originated from X mention → reply to user via @reppodant with result links
+### Mention Handler (`src/handlers/mention.ts`) — Primary Flow
+When a user replies to a post on X tagging @reppodant:
+1. Detect mention via X API (filtered stream or polling)
+2. Resolve the parent post (the post being replied to) — `in_reply_to_tweet_id`
+3. Fetch parent post content via X API:
+   - Text body
+   - Author handle + display name
+   - Attached images/media URLs
+   - Original post URL (`https://x.com/{author}/status/{id}`)
+4. Approve REPPO spend if needed → `reppo.approve(podManager, publishingFee)`
+5. Call `podManager.mintPod(address, 50)` → get `txHash`, `podId`
+6. POST metadata to Reppo API (`/agents/{agentId}/pods`) with:
+   - `title`: derived from post text (first line or truncated)
+   - `sourceUrl`: the original X post URL
+   - `author`: original post author handle
+   - `imageUrl`: first attached image (if any)
+7. Reply to the user via @reppodant: "Pod minted! reppo.ai/pod/{podId} | basescan.org/tx/{txHash}"
 
-### Mention Handler (`src/handlers/mention.ts`)
-When a user tags @reppodant on X:
-1. Parse the mention — extract intent (publish / mint), referenced content (quoted post, attached media, text)
-2. Normalize into the same job input format used by ACP jobs
-3. Route to publish or mint handler
-4. Reply via @reppodant with result (moltbook URL, basescan link, pod ID)
+### ACP Job Handler (`src/handlers/acpJob.ts`)
+When an AI agent submits a job via ACP (directly or routed by Butler):
+1. Parse job payload — expects `{postUrl}` (an X post URL)
+2. Fetch the X post content using the same logic as the mention handler
+3. Mint pod + submit metadata (same steps 4–6 above)
+4. Call `job.deliver({postUrl, txHash, podId, basescanUrl, reppoUrl})`
 
-Butler may also route mentions it intercepts — in that case the job arrives as a standard ACP request and the mention handler is not triggered.
+### Single Offering (registered under @reppodant identity)
 
-### Two Offerings (registered under @reppodant identity)
-
-1. **"Reppodant Content Publish"** — full flow: Moltbook + mint + metadata
-   - Input: `{title, body, submolt?, description?, imageURL?, sourceUrl?}`
-   - Output: `{moltbookUrl, txHash, podId, basescanUrl}`
-
-2. **"Reppodant Pod Mint"** — mint from existing URL
-   - Input: `{title, url, description?, imageURL?, sourceUrl?}`
-   - Output: `{txHash, podId, basescanUrl}`
-
-`sourceUrl` is optional — agents can include an X post link or other content attribution URL.
+**"Reppodant Publish"** — fetch X post content → mint pod → submit to Reppo
+- Input: `{postUrl}` (URL of the X post to publish)
+- Output: `{postUrl, txHash, podId, basescanUrl, reppoUrl}`
 
 ---
 
@@ -253,10 +246,6 @@ REPPO_API_URL=https://reppo.ai/api/v1
 REPPO_AGENT_NAME=reppodant           # Registered under @reppodant identity
 REPPO_AGENT_DESCRIPTION=Reppodant — autonomous publishing agent for Reppo
 
-# Moltbook
-MOLTBOOK_API_KEY=...
-MOLTBOOK_API_URL=https://www.moltbook.com/api/v1
-
 # X / Twitter (@reppodant)
 TWITTER_API_KEY=...                  # @reppodant app credentials
 TWITTER_API_SECRET=...
@@ -266,7 +255,7 @@ TWITTER_BEARER_TOKEN=...             # For filtered stream / search
 
 # Optional
 RPC_URL=                             # Custom Base RPC (default: public)
-POLL_INTERVAL_MS=30000               # Job polling interval
+POLL_INTERVAL_MS=30000               # ACP job polling interval
 MENTION_POLL_INTERVAL_MS=15000       # @reppodant mention check interval
 ```
 
@@ -302,28 +291,27 @@ function allowance(address owner, address spender) view returns (uint256)
 
 ## Implementation Phases
 
-### Phase 1: Project scaffold + config + Reppo/Moltbook clients
+### Phase 1: Project scaffold + config + X client
 - `package.json`, `tsconfig.json`, `.env.example`
 - `src/config.ts` — load and validate env vars (including @reppodant X creds)
-- `src/reppo.ts` — register agent (as "reppodant"), submit metadata (HTTP calls)
-- `src/moltbook.ts` — post content (HTTP call)
+- `src/twitter.ts` — X API client: mention monitoring, fetch post content, reply
+- `src/reppo.ts` — register agent (as "reppodant"), submit pod metadata
 - `src/chain.ts` — viem clients, mintPod, approve, balance checks
 
-### Phase 2: ACP integration + job handlers
-- `src/acp.ts` — AcpClient init, session management (entity registered as @reppodant)
-- `src/butler.ts` — Butler integration for routed jobs
-- `src/handlers/publish.ts` — full publish job handler
-- `src/handlers/mint.ts` — mint-only job handler
-- `src/index.ts` — wire everything together, start service
+### Phase 2: Mention handler (core flow)
+- `src/handlers/mention.ts` — detect mention → fetch parent post → mint → submit to Reppo → reply
+- Mention dedup (track processed mention IDs, don't mint the same post twice)
+- `src/index.ts` — wire mention listener + chain + Reppo, start service
 
-### Phase 3: X integration (@reppodant)
-- `src/twitter.ts` — X API client, mention polling/streaming for @reppodant
-- `src/handlers/mention.ts` — parse mentions, extract intent, route to handlers, reply
-- Rate limiting and dedup (don't process the same mention twice)
+### Phase 3: ACP integration
+- `src/acp.ts` — AcpClient init, session management (entity registered as @reppodant)
+- `src/handlers/acpJob.ts` — accept ACP job with X post URL → fetch → mint → deliver
+- Single offering: "Reppodant Publish"
 
 ### Phase 4: Testing + error handling
-- Tests with mocked ACP SDK, HTTP calls, X API, and chain interactions
+- Tests with mocked X API, ACP SDK, and chain interactions
 - Retry logic for API calls and transactions
+- Rate limiting for X API (respect endpoint limits)
 - Graceful shutdown on SIGINT
 - Logging
 
@@ -333,13 +321,12 @@ function allowance(address owner, address spender) view returns (uint256)
 
 1. Service starts without errors with valid config
 2. Registers with Reppo API on first run (as "reppodant")
-3. Connects to ACP and listens for jobs under @reppodant identity
-4. Mock ACP job triggers publish handler → Moltbook post + pod mint + metadata submission
-5. Deliverable sent back via ACP with correct fields
-6. Direct @reppodant mention on X → parsed, routed, published, reply posted
-7. Butler-routed jobs processed identically to direct ACP jobs
-8. No interaction touches the main Reppo X account
-9. Existing reppo-agent-publisher CLI unaffected
+3. User replies to an X post tagging @reppodant → agent fetches parent post → mints pod → replies with links
+4. Same post mentioned twice → second mention is deduped, not minted again
+5. ACP job with X post URL → agent fetches post → mints pod → delivers result via ACP
+6. Butler-routed ACP jobs processed identically to direct ACP jobs
+7. No interaction touches the main Reppo X account
+8. Existing reppo-agent-publisher CLI unaffected
 
 ---
 

@@ -1,4 +1,4 @@
-import AcpClient, { AcpContractClientV2, baseAcpConfigV2, type AcpJob } from '@virtuals-protocol/acp-node';
+import AcpClient, { AcpContractClientV2, baseAcpConfigV2, baseSepoliaAcpConfigV2, type AcpJob } from '@virtuals-protocol/acp-node';
 import type { Config } from './config.js';
 import { handlePublishJob } from './handlers/publish.js';
 import type { Clients, AgentSession } from './types.js';
@@ -14,11 +14,13 @@ export async function initAcp(
 ): Promise<AcpContext> {
   const pk = config.PRIVATE_KEY.startsWith('0x') ? config.PRIVATE_KEY : `0x${config.PRIVATE_KEY}`;
 
+  const acpConfig = config.ACP_TESTNET ? baseSepoliaAcpConfigV2 : baseAcpConfigV2;
+
   const contractClient = await AcpContractClientV2.build(
     pk as `0x${string}`,
     config.ACP_ENTITY_ID,
     config.ACP_WALLET_ADDRESS as `0x${string}`,
-    baseAcpConfigV2,
+    acpConfig,
   );
 
   const acpClient = new AcpClient({

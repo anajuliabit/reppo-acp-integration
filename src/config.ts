@@ -10,6 +10,7 @@ export interface Config {
   TWITTER_BEARER_TOKEN: string;
   RPC_URL?: string;
   POLL_INTERVAL_MS: number;
+  ACP_TESTNET: boolean;
 }
 
 const REQUIRED_VARS = [
@@ -38,5 +39,6 @@ export function loadConfig(): Config {
     TWITTER_BEARER_TOKEN: process.env['TWITTER_BEARER_TOKEN']!,
     RPC_URL: process.env['RPC_URL'] || undefined,
     POLL_INTERVAL_MS: Number(process.env['POLL_INTERVAL_MS'] || 10_000),
+    ACP_TESTNET: process.env['ACP_TESTNET'] === 'true',
   };
 }

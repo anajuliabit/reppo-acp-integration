@@ -1,6 +1,6 @@
 import { extractTweetId, fetchTweet } from '../twitter.js';
 import { mintPod } from '../chain.js';
-import { submitPodMetadata } from '../reppo.js';
+import { submitPodMetadata, getOrCreateBuyerAgent } from '../reppo.js';
 import type { Clients, AgentSession, AcpDeliverable } from '../types.js';
 import type { Config } from '../config.js';
 
@@ -20,16 +20,19 @@ export async function handlePublishJob(
   session: AgentSession,
   config: Config,
 ): Promise<void> {
-  // Extract postUrl from job payload
+  // Extract postUrl, subnet, and optional agent info from job payload
   const memos = job.memos ?? [];
   let postUrl: string | undefined;
+  let subnet: string | undefined;
+  let agentName: string | undefined;
+  let agentDescription: string | undefined;
   for (const memo of memos) {
     try {
       const content = typeof memo.content === 'string' ? JSON.parse(memo.content) : memo.content;
-      if (content?.postUrl) {
-        postUrl = content.postUrl;
-        break;
-      }
+      if (content?.postUrl) postUrl = content.postUrl;
+      if (content?.subnet) subnet = content.subnet;
+      if (content?.agentName) agentName = content.agentName;
+      if (content?.agentDescription) agentDescription = content.agentDescription;
     } catch {
       // Not JSON, skip
     }
@@ -39,6 +42,14 @@ export async function handlePublishJob(
     await job.reject('Missing postUrl in job payload');
     return;
   }
+
+  if (!subnet) {
+    await job.reject('Missing subnet in job payload');
+    return;
+  }
+
+  // Get buyer identifier from ACP job (wallet address or entity ID)
+  const buyerId = job.clientAddress ?? job.buyerAddress ?? job.client?.address ?? null;
 
   // Validate URL format
   if (!/(?:twitter\.com|x\.com)\/\w+\/status\/\d+/.test(postUrl)) {
@@ -66,15 +77,26 @@ export async function handlePublishJob(
   const mintResult = await mintPod(clients);
   console.log(`[Publish] Pod minted: tx=${mintResult.txHash}, podId=${mintResult.podId}`);
 
+  // Get or create buyer's Reppo profile if agent info provided
+  let publishSession = session; // default to reppodant
+  if (buyerId && agentName) {
+    const buyerSession = await getOrCreateBuyerAgent(config, buyerId, agentName, agentDescription);
+    if (buyerSession) {
+      publishSession = buyerSession;
+      console.log(`[Publish] Using buyer's Reppo profile: ${buyerSession.agentId}`);
+    }
+  }
+
   // Submit metadata to Reppo
   const title = tweet.text.length > 100 ? tweet.text.slice(0, 97) + '...' : tweet.text;
-  await submitPodMetadata(session, config, {
+  await submitPodMetadata(publishSession, config, {
     txHash: mintResult.txHash,
     title,
     description: tweet.text,
     url: postUrl,
     imageURL: tweet.mediaUrls[0],
     tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
+    subnet,
   });
 
   // Mark as processed
@@ -84,6 +106,7 @@ export async function handlePublishJob(
   const basescanUrl = `https://basescan.org/tx/${mintResult.txHash}`;
   const deliverable: AcpDeliverable = {
     postUrl,
+    subnet,
     txHash: mintResult.txHash,
     podId: mintResult.podId?.toString(),
     basescanUrl,

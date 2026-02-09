@@ -28,6 +28,7 @@ export interface SubmitMetadataParams {
   url: string;
   imageURL?: string;
   tokenId?: number;
+  subnet: string;
 }
 
 export interface Clients {
@@ -47,10 +48,14 @@ export interface TweetData {
 
 export interface AcpJobPayload {
   postUrl: string;
+  subnet: string;
+  agentName?: string;
+  agentDescription?: string;
 }
 
 export interface AcpDeliverable {
   postUrl: string;
+  subnet: string;
   txHash: string;
   podId?: string;
   basescanUrl: string;

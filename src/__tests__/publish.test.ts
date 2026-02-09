@@ -1,5 +1,34 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handlePublishJob, hasProcessed, clearProcessed } from '../handlers/publish.js';
+import { handlePublishJob } from '../handlers/publish.js';
+
+// Mock dedup module
+vi.mock('../lib/dedup.js', () => {
+  const processed = new Set<string>();
+  const locks = new Set<string>();
+  return {
+    initDedup: vi.fn(),
+    hasProcessed: (id: string) => processed.has(id),
+    markProcessed: vi.fn(async (id: string) => { processed.add(id); }),
+    acquireProcessingLock: vi.fn(async (id: string) => {
+      if (locks.has(id)) return null;
+      locks.add(id);
+      return () => { locks.delete(id); };
+    }),
+    getProcessedCount: () => processed.size,
+    // For test reset
+    _reset: () => { processed.clear(); locks.clear(); },
+  };
+});
+
+// Mock logger
+vi.mock('../lib/logger.js', () => ({
+  createLogger: () => ({
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  }),
+}));
 
 // Mock twitter module
 vi.mock('../twitter.js', () => ({
@@ -29,15 +58,21 @@ vi.mock('../chain.js', () => ({
 // Mock reppo module
 vi.mock('../reppo.js', () => ({
   submitPodMetadata: vi.fn().mockResolvedValue({ data: { id: 'pod-1' } }),
+  getOrCreateBuyerAgent: vi.fn().mockResolvedValue(null),
 }));
 
-function createMockJob(postUrl?: string) {
+function createMockJob(postUrl?: string, subnet?: string) {
+  const content: Record<string, string> = {};
+  if (postUrl) content.postUrl = postUrl;
+  if (subnet) content.subnet = subnet;
+  
   return {
     id: 'job-1',
-    memos: postUrl ? [{ content: JSON.stringify({ postUrl }) }] : [],
+    memos: Object.keys(content).length > 0 ? [{ content: JSON.stringify(content) }] : [],
     accept: vi.fn().mockResolvedValue(undefined),
     reject: vi.fn().mockResolvedValue(undefined),
     deliver: vi.fn().mockResolvedValue(undefined),
+    evaluate: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -48,53 +83,64 @@ const mockConfig = {
 } as any;
 
 describe('handlePublishJob', () => {
-  beforeEach(() => {
-    clearProcessed();
+  beforeEach(async () => {
+    // Reset dedup state
+    const dedup = await import('../lib/dedup.js');
+    (dedup as any)._reset();
     vi.clearAllMocks();
   });
 
   it('processes a valid job end-to-end', async () => {
-    const job = createMockJob('https://x.com/testuser/status/1234567890');
+    const job = createMockJob('https://x.com/testuser/status/1234567890', 'crypto');
 
-    await handlePublishJob(job, mockClients, mockSession, mockConfig);
+    await handlePublishJob(job as any, mockClients, mockSession, mockConfig);
 
     expect(job.accept).toHaveBeenCalledWith('Processing X post for pod minting');
     expect(job.deliver).toHaveBeenCalledOnce();
 
     const deliverable = job.deliver.mock.calls[0][0];
     expect(deliverable.postUrl).toBe('https://x.com/testuser/status/1234567890');
+    expect(deliverable.subnet).toBe('crypto');
     expect(deliverable.txHash).toBe('0xabc123');
     expect(deliverable.podId).toBe('42');
     expect(deliverable.basescanUrl).toBe('https://basescan.org/tx/0xabc123');
   });
 
   it('rejects job with missing postUrl', async () => {
-    const job = createMockJob();
+    const job = createMockJob(undefined, 'crypto');
 
-    await handlePublishJob(job, mockClients, mockSession, mockConfig);
+    await handlePublishJob(job as any, mockClients, mockSession, mockConfig);
 
     expect(job.reject).toHaveBeenCalledWith('Missing postUrl in job payload');
     expect(job.accept).not.toHaveBeenCalled();
   });
 
-  it('rejects job with invalid URL', async () => {
-    const job = createMockJob('https://example.com/not-a-tweet');
+  it('rejects job with missing subnet', async () => {
+    const job = createMockJob('https://x.com/testuser/status/1234567890');
 
-    await handlePublishJob(job, mockClients, mockSession, mockConfig);
+    await handlePublishJob(job as any, mockClients, mockSession, mockConfig);
+
+    expect(job.reject).toHaveBeenCalledWith('Missing subnet in job payload');
+    expect(job.accept).not.toHaveBeenCalled();
+  });
+
+  it('rejects job with invalid URL', async () => {
+    const job = createMockJob('https://example.com/not-a-tweet', 'crypto');
+
+    await handlePublishJob(job as any, mockClients, mockSession, mockConfig);
 
     expect(job.reject).toHaveBeenCalledWith('Invalid X/Twitter URL: https://example.com/not-a-tweet');
     expect(job.accept).not.toHaveBeenCalled();
   });
 
   it('deduplicates same tweet ID', async () => {
-    const job1 = createMockJob('https://x.com/testuser/status/1234567890');
-    const job2 = createMockJob('https://x.com/otheruser/status/1234567890');
+    const job1 = createMockJob('https://x.com/testuser/status/1234567890', 'crypto');
+    const job2 = createMockJob('https://x.com/otheruser/status/1234567890', 'crypto');
 
-    await handlePublishJob(job1, mockClients, mockSession, mockConfig);
+    await handlePublishJob(job1 as any, mockClients, mockSession, mockConfig);
     expect(job1.deliver).toHaveBeenCalledOnce();
-    expect(hasProcessed('1234567890')).toBe(true);
 
-    await handlePublishJob(job2, mockClients, mockSession, mockConfig);
+    await handlePublishJob(job2 as any, mockClients, mockSession, mockConfig);
     expect(job2.reject).toHaveBeenCalledWith('Tweet 1234567890 already processed');
   });
 });

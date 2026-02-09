@@ -4,6 +4,7 @@ import {
   http,
   formatUnits,
   decodeEventLog,
+  encodeFunctionData,
   type Address,
   type TransactionReceipt,
 } from 'viem';
@@ -14,15 +15,22 @@ import {
   REPPO_TOKEN,
   USDC_TOKEN,
   UNISWAP_ROUTER,
+  UNISWAP_QUOTER,
   POD_ABI,
   ERC20_ABI,
   SWAP_ROUTER_ABI,
+  QUOTER_ABI,
   EMISSION_SHARE,
   TX_RECEIPT_TIMEOUT,
   SWAP_SLIPPAGE_BPS,
+  SWAP_DEADLINE_SECONDS,
+  POOL_FEE_TIERS,
 } from './constants.js';
-import { withRetry } from './lib/http.js';
+import { withRetry, isRetryableError } from './lib/http.js';
+import { createLogger } from './lib/logger.js';
 import type { Clients, MintResult } from './types.js';
+
+const log = createLogger('chain');
 
 export function createClients(privateKey: string, rpcUrl?: string): Clients {
   const account = privateKeyToAccount(
@@ -43,6 +51,7 @@ export async function getPublishingFee(clients: Clients): Promise<bigint> {
         functionName: 'publishingFee',
       })) as bigint,
     'getPublishingFee',
+    { shouldRetry: isRetryableError },
   );
 }
 
@@ -56,6 +65,7 @@ export async function getReppoBalance(clients: Clients, address: Address): Promi
         args: [address],
       })) as bigint,
     'getReppoBalance',
+    { shouldRetry: isRetryableError },
   );
 }
 
@@ -69,6 +79,7 @@ export async function getAllowance(clients: Clients, owner: Address): Promise<bi
         args: [owner, POD_CONTRACT],
       })) as bigint,
     'getAllowance',
+    { shouldRetry: isRetryableError },
   );
 }
 
@@ -82,6 +93,7 @@ export async function getUsdcBalance(clients: Clients, address: Address): Promis
         args: [address],
       })) as bigint,
     'getUsdcBalance',
+    { shouldRetry: isRetryableError },
   );
 }
 
@@ -95,44 +107,93 @@ export async function getUsdcAllowance(clients: Clients, owner: Address): Promis
         args: [owner, UNISWAP_ROUTER],
       })) as bigint,
     'getUsdcAllowance',
+    { shouldRetry: isRetryableError },
   );
 }
 
 /**
+ * Get a quote for swapping USDC to exact amount of REPPO
+ * Tries multiple pool fee tiers to find one that works
+ */
+export async function getSwapQuote(
+  clients: Clients,
+  amountOut: bigint,
+): Promise<{ amountIn: bigint; fee: number }> {
+  for (const fee of POOL_FEE_TIERS) {
+    try {
+      const result = await clients.publicClient.readContract({
+        address: UNISWAP_QUOTER,
+        abi: QUOTER_ABI,
+        functionName: 'quoteExactOutputSingle',
+        args: [{
+          tokenIn: USDC_TOKEN,
+          tokenOut: REPPO_TOKEN,
+          amount: amountOut,
+          fee,
+          sqrtPriceLimitX96: 0n,
+        }],
+      }) as [bigint, bigint, number, bigint];
+      
+      const amountIn = result[0];
+      log.info({ fee, amountIn: formatUnits(amountIn, 6), amountOut: formatUnits(amountOut, 18) }, 'Got swap quote');
+      return { amountIn, fee };
+    } catch (err) {
+      log.debug({ fee, error: (err as Error).message }, 'Quote failed for fee tier, trying next');
+    }
+  }
+  
+  throw new Error('No liquidity found for USDC/REPPO swap in any fee tier');
+}
+
+/**
  * Swap USDC → REPPO to cover publishing fee.
- * Uses Uniswap V3 exactOutputSingle to get exact amount of REPPO needed.
- * @param clients - viem clients
- * @param amountOut - exact REPPO amount needed (18 decimals)
- * @param maxAmountIn - max USDC to spend (6 decimals), with slippage
+ * Uses Uniswap V3 exactOutputSingle with proper deadline via multicall.
  */
 export async function swapUsdcToReppo(
   clients: Clients,
   amountOut: bigint,
-  maxAmountIn: bigint,
 ): Promise<{ txHash: `0x${string}`; amountIn: bigint }> {
   const { account, publicClient, walletClient } = clients;
 
+  // Get quote to determine actual USDC needed + correct pool fee
+  const quote = await getSwapQuote(clients, amountOut);
+  
+  // Add slippage buffer
+  const amountInWithSlippage = quote.amountIn + (quote.amountIn * BigInt(SWAP_SLIPPAGE_BPS) / 10000n);
+  
+  log.info({
+    amountOut: formatUnits(amountOut, 18),
+    quotedIn: formatUnits(quote.amountIn, 6),
+    maxIn: formatUnits(amountInWithSlippage, 6),
+    fee: quote.fee,
+  }, 'Preparing swap');
+
   // Check USDC balance
   const usdcBalance = await getUsdcBalance(clients, account.address);
-  console.log(`USDC balance: ${formatUnits(usdcBalance, 6)}`);
-  if (usdcBalance < maxAmountIn) {
+  log.info({ balance: formatUnits(usdcBalance, 6), needed: formatUnits(amountInWithSlippage, 6) }, 'USDC balance');
+  
+  if (usdcBalance < amountInWithSlippage) {
     throw new Error(
-      `Insufficient USDC for swap. Need up to ${formatUnits(maxAmountIn, 6)}, have ${formatUnits(usdcBalance, 6)}`,
+      `Insufficient USDC for swap. Need up to ${formatUnits(amountInWithSlippage, 6)}, have ${formatUnits(usdcBalance, 6)}`,
     );
   }
 
   // Approve USDC spend to router if needed
   const allowance = await getUsdcAllowance(clients, account.address);
-  if (allowance < maxAmountIn) {
-    console.log('Approving USDC spend for swap...');
-    const approveTx = await walletClient.writeContract({
-      address: USDC_TOKEN,
-      abi: ERC20_ABI,
-      functionName: 'approve',
-      args: [UNISWAP_ROUTER, maxAmountIn],
-      chain: base,
-      account,
-    });
+  if (allowance < amountInWithSlippage) {
+    log.info('Approving USDC spend for swap...');
+    const approveTx = await withRetry(
+      () => walletClient.writeContract({
+        address: USDC_TOKEN,
+        abi: ERC20_ABI,
+        functionName: 'approve',
+        args: [UNISWAP_ROUTER, amountInWithSlippage],
+        chain: base,
+        account,
+      }),
+      'approveUSDC',
+      { shouldRetry: isRetryableError },
+    );
     const approveReceipt = await publicClient.waitForTransactionReceipt({
       hash: approveTx,
       timeout: TX_RECEIPT_TIMEOUT,
@@ -140,33 +201,40 @@ export async function swapUsdcToReppo(
     if (approveReceipt.status === 'reverted') {
       throw new Error(`USDC approval reverted: ${approveTx}`);
     }
-    console.log('  USDC approved');
+    log.info({ tx: approveTx }, 'USDC approved');
   }
 
-  // Swap via exactOutputSingle
-  // Pool fee: 3000 = 0.3% (common tier), try 10000 = 1% if low liquidity
-  const poolFee = 3000;
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300); // 5 min
-
-  console.log(`Swapping USDC → REPPO (need ${formatUnits(amountOut, 18)} REPPO)...`);
-  const swapTx = await walletClient.writeContract({
-    address: UNISWAP_ROUTER,
+  // Build swap calldata
+  const swapData = encodeFunctionData({
     abi: SWAP_ROUTER_ABI,
     functionName: 'exactOutputSingle',
-    args: [
-      {
-        tokenIn: USDC_TOKEN,
-        tokenOut: REPPO_TOKEN,
-        fee: poolFee,
-        recipient: account.address,
-        amountOut,
-        amountInMaximum: maxAmountIn,
-        sqrtPriceLimitX96: 0n, // no price limit
-      },
-    ],
-    chain: base,
-    account,
+    args: [{
+      tokenIn: USDC_TOKEN,
+      tokenOut: REPPO_TOKEN,
+      fee: quote.fee,
+      recipient: account.address,
+      amountOut,
+      amountInMaximum: amountInWithSlippage,
+      sqrtPriceLimitX96: 0n,
+    }],
   });
+
+  // Execute swap via multicall with deadline
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + SWAP_DEADLINE_SECONDS);
+  
+  log.info({ deadline: new Date(Number(deadline) * 1000).toISOString() }, 'Executing swap with deadline...');
+  const swapTx = await withRetry(
+    () => walletClient.writeContract({
+      address: UNISWAP_ROUTER,
+      abi: SWAP_ROUTER_ABI,
+      functionName: 'multicall',
+      args: [deadline, [swapData]],
+      chain: base,
+      account,
+    }),
+    'swapUsdcToReppo',
+    { shouldRetry: isRetryableError },
+  );
 
   const swapReceipt = await publicClient.waitForTransactionReceipt({
     hash: swapTx,
@@ -177,8 +245,8 @@ export async function swapUsdcToReppo(
     throw new Error(`Swap reverted: ${swapTx}`);
   }
 
-  console.log(`  Swap complete: ${swapTx}`);
-  return { txHash: swapTx, amountIn: maxAmountIn }; // Actual amountIn would need log parsing
+  log.info({ tx: swapTx }, 'Swap complete');
+  return { txHash: swapTx, amountIn: quote.amountIn };
 }
 
 /**
@@ -186,22 +254,26 @@ export async function swapUsdcToReppo(
  */
 export async function ensureReppoBalance(clients: Clients, feeNeeded: bigint): Promise<void> {
   const balance = await getReppoBalance(clients, clients.account.address);
-  console.log(`REPPO balance: ${formatUnits(balance, 18)}, need: ${formatUnits(feeNeeded, 18)}`);
+  log.info({
+    balance: formatUnits(balance, 18),
+    needed: formatUnits(feeNeeded, 18),
+  }, 'Checking REPPO balance');
 
   if (balance >= feeNeeded) {
-    console.log('Sufficient REPPO balance');
+    log.info('Sufficient REPPO balance');
     return;
   }
 
   const shortfall = feeNeeded - balance;
-  console.log(`Need to swap for ${formatUnits(shortfall, 18)} more REPPO`);
+  log.info({ shortfall: formatUnits(shortfall, 18) }, 'Need to swap for more REPPO');
 
-  // Estimate USDC needed (rough: assume 1 REPPO ~ $0.01-$1, add slippage buffer)
-  // This is a rough estimate - in production you'd use a quoter contract
-  // For now, assume max 10 USDC per job (adjust based on actual REPPO price)
-  const maxUsdcIn = 10_000_000n; // 10 USDC (6 decimals)
-
-  await swapUsdcToReppo(clients, shortfall, maxUsdcIn);
+  await swapUsdcToReppo(clients, shortfall);
+  
+  // Verify balance after swap
+  const newBalance = await getReppoBalance(clients, clients.account.address);
+  if (newBalance < feeNeeded) {
+    throw new Error(`Swap completed but still insufficient REPPO. Have ${formatUnits(newBalance, 18)}, need ${formatUnits(feeNeeded, 18)}`);
+  }
 }
 
 function extractPodId(receipt: TransactionReceipt): bigint | undefined {
@@ -226,7 +298,7 @@ export async function mintPod(clients: Clients): Promise<MintResult> {
   const { account, publicClient, walletClient } = clients;
 
   const fee = await getPublishingFee(clients);
-  console.log(`Publishing fee: ${formatUnits(fee, 18)} REPPO`);
+  log.info({ fee: formatUnits(fee, 18) }, 'Publishing fee');
 
   if (fee > 0n) {
     // Ensure we have enough REPPO (swap USDC if needed)
@@ -235,16 +307,20 @@ export async function mintPod(clients: Clients): Promise<MintResult> {
     // Approve REPPO spend for minting
     const allowance = await getAllowance(clients, account.address);
     if (allowance < fee) {
-      console.log('Approving REPPO spend...');
-      const approveTx = await walletClient.writeContract({
-        address: REPPO_TOKEN,
-        abi: ERC20_ABI,
-        functionName: 'approve',
-        args: [POD_CONTRACT, fee],
-        chain: base,
-        account,
-      });
-      console.log(`  Approve tx: ${approveTx}`);
+      log.info('Approving REPPO spend...');
+      const approveTx = await withRetry(
+        () => walletClient.writeContract({
+          address: REPPO_TOKEN,
+          abi: ERC20_ABI,
+          functionName: 'approve',
+          args: [POD_CONTRACT, fee],
+          chain: base,
+          account,
+        }),
+        'approveREPPO',
+        { shouldRetry: isRetryableError },
+      );
+      log.info({ tx: approveTx }, 'Approve tx submitted');
       const approveReceipt = await publicClient.waitForTransactionReceipt({
         hash: approveTx,
         timeout: TX_RECEIPT_TIMEOUT,
@@ -252,22 +328,26 @@ export async function mintPod(clients: Clients): Promise<MintResult> {
       if (approveReceipt.status === 'reverted') {
         throw new Error(`Approval transaction reverted: ${approveTx}`);
       }
-      console.log('  Approved');
+      log.info('REPPO approved');
     } else {
-      console.log('Already approved');
+      log.info('Already approved');
     }
   }
 
-  console.log('Minting pod on Base...');
-  const mintTx = await walletClient.writeContract({
-    address: POD_CONTRACT,
-    abi: POD_ABI,
-    functionName: 'mintPod',
-    args: [account.address, EMISSION_SHARE],
-    chain: base,
-    account,
-  });
-  console.log(`  Mint tx: ${mintTx}`);
+  log.info('Minting pod on Base...');
+  const mintTx = await withRetry(
+    () => walletClient.writeContract({
+      address: POD_CONTRACT,
+      abi: POD_ABI,
+      functionName: 'mintPod',
+      args: [account.address, EMISSION_SHARE],
+      chain: base,
+      account,
+    }),
+    'mintPod',
+    { shouldRetry: isRetryableError },
+  );
+  log.info({ tx: mintTx }, 'Mint tx submitted');
 
   const receipt = await publicClient.waitForTransactionReceipt({
     hash: mintTx,
@@ -279,7 +359,7 @@ export async function mintPod(clients: Clients): Promise<MintResult> {
   }
 
   const podId = extractPodId(receipt);
-  console.log(`  Pod minted! Block: ${receipt.blockNumber}${podId !== undefined ? `, Pod ID: ${podId}` : ''}`);
+  log.info({ block: receipt.blockNumber, podId: podId?.toString() }, 'Pod minted!');
 
   return { txHash: mintTx, receipt, podId };
 }

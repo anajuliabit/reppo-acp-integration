@@ -4,13 +4,18 @@ export const POD_CONTRACT: Address = '0xcfF0511089D0Fbe92E1788E4aFFF3E7930b3D47c
 export const REPPO_TOKEN: Address = '0xFf8104251E7761163faC3211eF5583FB3F8583d6';
 export const USDC_TOKEN: Address = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 export const UNISWAP_ROUTER: Address = '0x2626664c2603336E57B271c5C0b26F421741e481'; // SwapRouter02 on Base
+export const UNISWAP_QUOTER: Address = '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a'; // QuoterV2 on Base
 export const CHAIN_ID = 8453 as const; // Base
 export const EMISSION_SHARE = 50;
 export const SWAP_SLIPPAGE_BPS = 100; // 1% slippage tolerance
+export const SWAP_DEADLINE_SECONDS = 300; // 5 minutes
 
 export const TX_RECEIPT_TIMEOUT = 120_000; // 2 minutes
 export const MAX_RETRIES = 3;
 export const RETRY_BASE_DELAY = 1000; // 1 second
+
+// Pool fee tiers to try (in order of preference)
+export const POOL_FEE_TIERS = [3000, 10000, 500] as const; // 0.3%, 1%, 0.05%
 
 export const POD_ABI = parseAbi([
   'function mintPod(address to, uint8 emissionSharePercent) returns (uint256 podId)',
@@ -25,7 +30,13 @@ export const ERC20_ABI = parseAbi([
   'function decimals() view returns (uint8)',
 ]);
 
-// Uniswap V3 SwapRouter02 ABI (exactOutputSingle)
+// Uniswap V3 QuoterV2 ABI
+export const QUOTER_ABI = parseAbi([
+  'function quoteExactOutputSingle((address tokenIn, address tokenOut, uint256 amount, uint24 fee, uint160 sqrtPriceLimitX96)) returns (uint256 amountIn, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
+]);
+
+// Uniswap V3 SwapRouter02 ABI (with deadline via multicall)
 export const SWAP_ROUTER_ABI = parseAbi([
   'function exactOutputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountOut, uint256 amountInMaximum, uint160 sqrtPriceLimitX96)) payable returns (uint256 amountIn)',
+  'function multicall(uint256 deadline, bytes[] calldata data) payable returns (bytes[] memory results)',
 ]);

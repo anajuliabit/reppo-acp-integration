@@ -1,118 +1,196 @@
 import { extractTweetId, fetchTweet } from '../twitter.js';
 import { mintPod } from '../chain.js';
 import { submitPodMetadata, getOrCreateBuyerAgent } from '../reppo.js';
-import type { Clients, AgentSession, AcpDeliverable } from '../types.js';
+import { hasProcessed, markProcessed, acquireProcessingLock } from '../lib/dedup.js';
+import { createLogger } from '../lib/logger.js';
+import type { Clients, AgentSession, AcpDeliverable, AcpJob, ParsedJobContent } from '../types.js';
 import type { Config } from '../config.js';
 
-const processedTweets = new Set<string>();
+const log = createLogger('publish');
 
-export function hasProcessed(tweetId: string): boolean {
-  return processedTweets.has(tweetId);
-}
-
-export function clearProcessed(): void {
-  processedTweets.clear();
-}
-
-export async function handlePublishJob(
-  job: any,
-  clients: Clients,
-  session: AgentSession,
-  config: Config,
-): Promise<void> {
-  // Extract postUrl, subnet, and optional agent info from job payload
+/**
+ * Parse job content from ACP memos
+ */
+function parseJobContent(job: AcpJob): ParsedJobContent {
   const memos = job.memos ?? [];
-  let postUrl: string | undefined;
-  let subnet: string | undefined;
-  let agentName: string | undefined;
-  let agentDescription: string | undefined;
+  const result: ParsedJobContent = {};
+  
   for (const memo of memos) {
     try {
-      const content = typeof memo.content === 'string' ? JSON.parse(memo.content) : memo.content;
-      if (content?.postUrl) postUrl = content.postUrl;
-      if (content?.subnet) subnet = content.subnet;
-      if (content?.agentName) agentName = content.agentName;
-      if (content?.agentDescription) agentDescription = content.agentDescription;
+      const content = typeof memo.content === 'string' 
+        ? JSON.parse(memo.content) 
+        : memo.content;
+      
+      if (content?.postUrl && !result.postUrl) result.postUrl = content.postUrl;
+      if (content?.subnet && !result.subnet) result.subnet = content.subnet;
+      if (content?.agentName && !result.agentName) result.agentName = content.agentName;
+      if (content?.agentDescription && !result.agentDescription) result.agentDescription = content.agentDescription;
     } catch {
       // Not JSON, skip
     }
   }
+  
+  return result;
+}
 
-  if (!postUrl) {
+/**
+ * Extract buyer identifier from ACP job
+ */
+function getBuyerId(job: AcpJob): string | null {
+  // Try various field names from ACP SDK
+  const buyerId = job.clientAddress 
+    ?? job.buyerAddress 
+    ?? job.client?.address 
+    ?? job.buyer?.address
+    ?? null;
+  
+  if (!buyerId) {
+    log.warn({ jobId: job.id }, 'Could not extract buyer ID from job');
+  }
+  
+  return buyerId;
+}
+
+export async function handlePublishJob(
+  job: AcpJob,
+  clients: Clients,
+  session: AgentSession,
+  config: Config,
+): Promise<void> {
+  const jobId = job.id ?? 'unknown';
+  log.info({ jobId }, 'Processing job');
+
+  // Parse job content
+  const content = parseJobContent(job);
+  
+  // === Validation BEFORE accepting ===
+  
+  // Validate required fields
+  if (!content.postUrl) {
+    log.warn({ jobId }, 'Missing postUrl');
     await job.reject('Missing postUrl in job payload');
     return;
   }
 
-  if (!subnet) {
+  if (!content.subnet) {
+    log.warn({ jobId }, 'Missing subnet');
     await job.reject('Missing subnet in job payload');
     return;
   }
 
-  // Get buyer identifier from ACP job (wallet address or entity ID)
-  const buyerId = job.clientAddress ?? job.buyerAddress ?? job.client?.address ?? null;
-
   // Validate URL format
-  if (!/(?:twitter\.com|x\.com)\/\w+\/status\/\d+/.test(postUrl)) {
-    await job.reject(`Invalid X/Twitter URL: ${postUrl}`);
+  if (!/(?:twitter\.com|x\.com)\/\w+\/status\/\d+/.test(content.postUrl)) {
+    log.warn({ jobId, url: content.postUrl }, 'Invalid URL format');
+    await job.reject(`Invalid X/Twitter URL: ${content.postUrl}`);
     return;
   }
 
-  // Accept the job
-  await job.accept('Processing X post for pod minting');
-
-  // Extract tweet ID and check dedup
-  const tweetId = extractTweetId(postUrl);
-  if (processedTweets.has(tweetId)) {
+  // Extract tweet ID
+  const tweetId = extractTweetId(content.postUrl);
+  
+  // Check dedup BEFORE accepting
+  if (hasProcessed(tweetId)) {
+    log.warn({ jobId, tweetId }, 'Tweet already processed (dedup)');
     await job.reject(`Tweet ${tweetId} already processed`);
     return;
   }
 
-  // Fetch tweet data
-  console.log(`[Publish] Fetching tweet ${tweetId}...`);
-  const tweet = await fetchTweet(tweetId);
-  console.log(`[Publish] Tweet by @${tweet.authorUsername}: "${tweet.text.slice(0, 80)}..."`);
-
-  // Mint pod on-chain
-  console.log(`[Publish] Minting pod...`);
-  const mintResult = await mintPod(clients);
-  console.log(`[Publish] Pod minted: tx=${mintResult.txHash}, podId=${mintResult.podId}`);
-
-  // Get or create buyer's Reppo profile if agent info provided
-  let publishSession = session; // default to reppodant
-  if (buyerId && agentName) {
-    const buyerSession = await getOrCreateBuyerAgent(config, buyerId, agentName, agentDescription);
-    if (buyerSession) {
-      publishSession = buyerSession;
-      console.log(`[Publish] Using buyer's Reppo profile: ${buyerSession.agentId}`);
-    }
+  // Acquire processing lock to prevent concurrent processing of same tweet
+  const releaseLock = await acquireProcessingLock(tweetId);
+  if (!releaseLock) {
+    log.warn({ jobId, tweetId }, 'Tweet currently being processed by another job');
+    await job.reject(`Tweet ${tweetId} is currently being processed`);
+    return;
   }
 
-  // Submit metadata to Reppo
-  const title = tweet.text.length > 100 ? tweet.text.slice(0, 97) + '...' : tweet.text;
-  await submitPodMetadata(publishSession, config, {
-    txHash: mintResult.txHash,
-    title,
-    description: tweet.text,
-    url: postUrl,
-    imageURL: tweet.mediaUrls[0],
-    tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
-    subnet,
-  });
+  // Double-check dedup after acquiring lock (another job might have just finished)
+  if (hasProcessed(tweetId)) {
+    releaseLock();
+    log.warn({ jobId, tweetId }, 'Tweet was processed while waiting for lock');
+    await job.reject(`Tweet ${tweetId} already processed`);
+    return;
+  }
 
-  // Mark as processed
-  processedTweets.add(tweetId);
+  // === All validations passed, now accept the job ===
+  try {
+    await job.accept('Processing X post for pod minting');
+    log.info({ jobId, tweetId }, 'Job accepted');
+  } catch (err) {
+    releaseLock();
+    throw err;
+  }
 
-  // Build deliverable
-  const basescanUrl = `https://basescan.org/tx/${mintResult.txHash}`;
-  const deliverable: AcpDeliverable = {
-    postUrl,
-    subnet,
-    txHash: mintResult.txHash,
-    podId: mintResult.podId?.toString(),
-    basescanUrl,
-  };
+  // === Process the job (after accept) ===
+  try {
+    // Fetch tweet data
+    log.info({ jobId, tweetId }, 'Fetching tweet...');
+    const tweet = await fetchTweet(tweetId);
+    log.info({ 
+      jobId, 
+      author: tweet.authorUsername, 
+      textPreview: tweet.text.slice(0, 80),
+    }, 'Tweet fetched');
 
-  // Deliver result via ACP
-  await job.deliver(deliverable);
-  console.log(`[Publish] Job delivered: ${basescanUrl}`);
+    // Mint pod on-chain
+    log.info({ jobId }, 'Minting pod...');
+    const mintResult = await mintPod(clients);
+    log.info({ 
+      jobId, 
+      txHash: mintResult.txHash, 
+      podId: mintResult.podId?.toString(),
+    }, 'Pod minted');
+
+    // Get or create buyer's Reppo profile if agent info provided
+    const buyerId = getBuyerId(job);
+    let publishSession = session; // default to reppodant
+    
+    if (buyerId && content.agentName) {
+      const buyerSession = await getOrCreateBuyerAgent(
+        config, 
+        buyerId, 
+        content.agentName, 
+        content.agentDescription,
+      );
+      if (buyerSession) {
+        publishSession = buyerSession;
+        log.info({ jobId, buyerAgentId: buyerSession.agentId }, 'Using buyer profile');
+      }
+    }
+
+    // Submit metadata to Reppo
+    const title = tweet.text.length > 100 ? tweet.text.slice(0, 97) + '...' : tweet.text;
+    await submitPodMetadata(publishSession, config, {
+      txHash: mintResult.txHash,
+      title,
+      description: tweet.text,
+      url: content.postUrl,
+      imageURL: tweet.mediaUrls[0],
+      tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
+      subnet: content.subnet,
+    });
+
+    // Mark as processed AFTER successful completion
+    await markProcessed(tweetId);
+
+    // Build deliverable
+    const basescanUrl = `https://basescan.org/tx/${mintResult.txHash}`;
+    const deliverable: AcpDeliverable = {
+      postUrl: content.postUrl,
+      subnet: content.subnet,
+      txHash: mintResult.txHash,
+      podId: mintResult.podId?.toString(),
+      basescanUrl,
+    };
+
+    // Deliver result via ACP
+    await job.deliver(deliverable);
+    log.info({ jobId, basescanUrl }, 'Job delivered successfully');
+
+  } catch (err) {
+    // Don't mark as processed on failure - allow retry
+    log.error({ jobId, tweetId, error: (err as Error).message }, 'Job processing failed');
+    throw err;
+  } finally {
+    releaseLock();
+  }
 }

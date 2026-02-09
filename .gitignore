@@ -1,4 +1,8 @@
 node_modules/
 dist/
 .env
+
+# Session and state files (contain secrets/state)
 .reppo-session.json
+.reppo-buyer-sessions.json
+.reppo-dedup.json

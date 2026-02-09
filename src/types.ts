@@ -61,3 +61,48 @@ export interface AcpDeliverable {
   basescanUrl: string;
   reppoUrl?: string;
 }
+
+/**
+ * ACP Job structure from @virtuals-protocol/acp-node
+ * Based on SDK types - update if SDK provides better types
+ */
+export interface AcpJobMemo {
+  id?: string;
+  type?: string;
+  content: string | Record<string, unknown>;
+  sender?: string;
+  timestamp?: number;
+}
+
+export interface AcpJob {
+  id?: string | number;
+  memos?: AcpJobMemo[];
+  // Buyer/client identification - check actual SDK for correct field
+  clientAddress?: string;
+  buyerAddress?: string;
+  client?: { address?: string; entityId?: number };
+  buyer?: { address?: string; entityId?: number };
+  // Job lifecycle methods
+  accept: (message: string) => Promise<void>;
+  reject: (reason: string) => Promise<void>;
+  deliver: (deliverable: AcpDeliverable) => Promise<void>;
+  evaluate: (approved: boolean, reason: string) => Promise<void>;
+}
+
+/**
+ * Parsed job content from memos
+ */
+export interface ParsedJobContent {
+  postUrl?: string;
+  subnet?: string;
+  agentName?: string;
+  agentDescription?: string;
+}
+
+/**
+ * Dedup state persisted to disk
+ */
+export interface DedupState {
+  processedTweets: string[];
+  lastUpdated: string;
+}

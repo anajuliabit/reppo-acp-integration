@@ -1,9 +1,12 @@
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
-import { fetchJSON } from './lib/http.js';
+import lockfile from 'proper-lockfile';
+import { fetchJSON, withRetry, isRetryableError } from './lib/http.js';
+import { createLogger } from './lib/logger.js';
 import type { Config } from './config.js';
 import type { AgentSession, RegisterAgentResponse, RegisterPodResponse, SubmitMetadataParams } from './types.js';
 
+const log = createLogger('reppo');
 const SESSION_FILE = resolve('.reppo-session.json');
 const BUYER_SESSIONS_FILE = resolve('.reppo-buyer-sessions.json');
 
@@ -34,10 +37,25 @@ function loadBuyerSessions(): BuyerSessionMap {
   }
 }
 
-function saveBuyerSession(buyerId: string, session: AgentSession): void {
-  const sessions = loadBuyerSessions();
-  sessions[buyerId] = session;
-  writeFileSync(BUYER_SESSIONS_FILE, JSON.stringify(sessions, null, 2), { mode: 0o600 });
+async function saveBuyerSession(buyerId: string, session: AgentSession): Promise<void> {
+  let release: (() => Promise<void>) | undefined;
+  try {
+    // Create file if it doesn't exist
+    if (!existsSync(BUYER_SESSIONS_FILE)) {
+      writeFileSync(BUYER_SESSIONS_FILE, '{}', { mode: 0o600 });
+    }
+    
+    release = await lockfile.lock(BUYER_SESSIONS_FILE, { retries: 3 });
+    
+    const sessions = loadBuyerSessions();
+    sessions[buyerId] = session;
+    writeFileSync(BUYER_SESSIONS_FILE, JSON.stringify(sessions, null, 2), { mode: 0o600 });
+  } catch (err) {
+    log.error({ err, buyerId }, 'Failed to save buyer session');
+    throw err;
+  } finally {
+    if (release) await release();
+  }
 }
 
 export function getBuyerSession(buyerId: string): AgentSession | null {
@@ -52,25 +70,29 @@ function getAuthHeaders(session: AgentSession): Record<string, string> {
 export async function registerAgent(config: Config): Promise<AgentSession> {
   const existing = loadSession();
   if (existing) {
-    console.log(`Already registered as agent ${existing.agentId}`);
+    log.info({ agentId: existing.agentId }, 'Already registered');
     return existing;
   }
 
-  console.log('Registering agent with Reppo...');
-  const res = await fetchJSON<RegisterAgentResponse>(`${config.REPPO_API_URL}/agents/register`, {
-    method: 'POST',
-    body: JSON.stringify({
-      name: config.REPPO_AGENT_NAME,
-      description: config.REPPO_AGENT_DESCRIPTION,
+  log.info('Registering agent with Reppo...');
+  const res = await withRetry(
+    () => fetchJSON<RegisterAgentResponse>(`${config.REPPO_API_URL}/agents/register`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: config.REPPO_AGENT_NAME,
+        description: config.REPPO_AGENT_DESCRIPTION,
+      }),
     }),
-  });
+    'registerAgent',
+    { shouldRetry: isRetryableError },
+  );
 
   const session: AgentSession = {
     agentId: res.data.id,
     accessToken: res.data.accessToken,
   };
   saveSession(session);
-  console.log(`Registered as agent ${session.agentId}`);
+  log.info({ agentId: session.agentId }, 'Registered successfully');
   return session;
 }
 
@@ -90,31 +112,35 @@ export async function getOrCreateBuyerAgent(
   // Check if we already have a session for this buyer
   const existing = getBuyerSession(buyerId);
   if (existing) {
-    console.log(`[Reppo] Buyer ${buyerId} already registered as agent ${existing.agentId}`);
+    log.info({ buyerId, agentId: existing.agentId }, 'Buyer already registered');
     return existing;
   }
 
   // Need name to register
   if (!name) {
-    console.log(`[Reppo] No agentName provided for new buyer ${buyerId}, skipping profile creation`);
+    log.info({ buyerId }, 'No agentName provided, skipping profile creation');
     return null;
   }
 
-  console.log(`[Reppo] Registering buyer ${buyerId} as "${name}"...`);
-  const res = await fetchJSON<RegisterAgentResponse>(`${config.REPPO_API_URL}/agents/register`, {
-    method: 'POST',
-    body: JSON.stringify({
-      name,
-      description: description || name,
+  log.info({ buyerId, name }, 'Registering buyer agent...');
+  const res = await withRetry(
+    () => fetchJSON<RegisterAgentResponse>(`${config.REPPO_API_URL}/agents/register`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        description: description || name,
+      }),
     }),
-  });
+    'registerBuyerAgent',
+    { shouldRetry: isRetryableError },
+  );
 
   const session: AgentSession = {
     agentId: res.data.id,
     accessToken: res.data.accessToken,
   };
-  saveBuyerSession(buyerId, session);
-  console.log(`[Reppo] Buyer registered as agent ${session.agentId}`);
+  await saveBuyerSession(buyerId, session);
+  log.info({ buyerId, agentId: session.agentId }, 'Buyer registered successfully');
   return session;
 }
 
@@ -123,24 +149,28 @@ export async function submitPodMetadata(
   config: Config,
   params: SubmitMetadataParams,
 ): Promise<RegisterPodResponse> {
-  console.log('Submitting metadata to Reppo...');
-  const data = await fetchJSON<RegisterPodResponse>(
-    `${config.REPPO_API_URL}/agents/${session.agentId}/pods`,
-    {
-      method: 'POST',
-      headers: getAuthHeaders(session),
-      body: JSON.stringify({
-        name: params.title,
-        description: params.description || params.title,
-        url: params.url,
-        platform: 'x',
-        subnet: params.subnet,
-        podMintTx: params.txHash,
-        ...(params.tokenId !== undefined && { tokenId: params.tokenId }),
-        ...(params.imageURL && { imageURL: params.imageURL }),
-      }),
-    },
+  log.info({ agentId: session.agentId, subnet: params.subnet }, 'Submitting metadata to Reppo...');
+  const data = await withRetry(
+    () => fetchJSON<RegisterPodResponse>(
+      `${config.REPPO_API_URL}/agents/${session.agentId}/pods`,
+      {
+        method: 'POST',
+        headers: getAuthHeaders(session),
+        body: JSON.stringify({
+          name: params.title,
+          description: params.description || params.title,
+          url: params.url,
+          platform: 'x',
+          subnet: params.subnet,
+          podMintTx: params.txHash,
+          ...(params.tokenId !== undefined && { tokenId: params.tokenId }),
+          ...(params.imageURL && { imageURL: params.imageURL }),
+        }),
+      },
+    ),
+    'submitPodMetadata',
+    { shouldRetry: isRetryableError },
   );
-  console.log('Metadata submitted');
+  log.info({ podId: data.data?.id }, 'Metadata submitted');
   return data;
 }

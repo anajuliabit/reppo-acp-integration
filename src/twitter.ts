@@ -1,6 +1,9 @@
 import TwitterApi from 'twitter-api-v2';
+import { withRetry } from './lib/http.js';
+import { createLogger } from './lib/logger.js';
 import type { TweetData } from './types.js';
 
+const log = createLogger('twitter');
 let _client: TwitterApi | null = null;
 
 export function initTwitterClient(bearerToken: string): TwitterApi {
@@ -21,14 +24,52 @@ export function extractTweetId(url: string): string {
   return match[1];
 }
 
+/**
+ * Check if Twitter API error is retryable
+ */
+function isRetryableTwitterError(error: Error): boolean {
+  const message = error.message.toLowerCase();
+  // Rate limits
+  if (message.includes('429') || message.includes('rate limit') || message.includes('too many requests')) {
+    return true;
+  }
+  // Server errors
+  if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('504')) {
+    return true;
+  }
+  // Network errors
+  if (message.includes('network') || message.includes('timeout') || message.includes('econnreset')) {
+    return true;
+  }
+  return false;
+}
+
 export async function fetchTweet(tweetId: string): Promise<TweetData> {
+  log.info({ tweetId }, 'Fetching tweet...');
+  
   const client = getClient();
-  const tweet = await client.v2.singleTweet(tweetId, {
-    expansions: ['author_id', 'attachments.media_keys'],
-    'tweet.fields': ['created_at', 'text', 'author_id'],
-    'user.fields': ['username'],
-    'media.fields': ['url', 'preview_image_url'],
-  });
+  
+  const tweet = await withRetry(
+    async () => {
+      const result = await client.v2.singleTweet(tweetId, {
+        expansions: ['author_id', 'attachments.media_keys'],
+        'tweet.fields': ['created_at', 'text', 'author_id'],
+        'user.fields': ['username'],
+        'media.fields': ['url', 'preview_image_url'],
+      });
+      return result;
+    },
+    'fetchTweet',
+    { 
+      shouldRetry: isRetryableTwitterError,
+      maxRetries: 5, // More retries for Twitter rate limits
+      baseDelay: 2000, // Longer base delay
+    },
+  );
+
+  if (!tweet.data) {
+    throw new Error(`Tweet ${tweetId} not found or not accessible`);
+  }
 
   const author = tweet.includes?.users?.[0];
   const media = tweet.includes?.media ?? [];
@@ -36,7 +77,7 @@ export async function fetchTweet(tweetId: string): Promise<TweetData> {
     .map((m) => m.url || m.preview_image_url)
     .filter((u): u is string => !!u);
 
-  return {
+  const result: TweetData = {
     id: tweet.data.id,
     text: tweet.data.text,
     authorId: tweet.data.author_id ?? author?.id ?? '',
@@ -44,4 +85,13 @@ export async function fetchTweet(tweetId: string): Promise<TweetData> {
     createdAt: tweet.data.created_at,
     mediaUrls,
   };
+
+  log.info({ 
+    tweetId, 
+    author: result.authorUsername, 
+    textLength: result.text.length,
+    mediaCount: mediaUrls.length,
+  }, 'Tweet fetched');
+
+  return result;
 }

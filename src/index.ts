@@ -65,6 +65,7 @@ async function main() {
   // Start health server
   const healthServer = createHealthServer(config.HEALTH_PORT);
 
+  /*
   // Register with Reppo API
   const session = await registerAgent(config);
   log.info({ agentId: session.agentId }, 'Reppo session ready');
@@ -134,6 +135,8 @@ async function main() {
     log.fatal({ reason }, 'Unhandled rejection');
     process.exit(1);
   });
+
+  */
 }
 
 main().catch((err) => {

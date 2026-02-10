@@ -1,4 +1,4 @@
-import TwitterApi from 'twitter-api-v2';
+import { TwitterApi } from 'twitter-api-v2';
 import { withRetry } from './lib/http.js';
 import { createLogger } from './lib/logger.js';
 import type { TweetData } from './types.js';

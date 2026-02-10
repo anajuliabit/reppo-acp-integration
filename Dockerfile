@@ -1,23 +1,27 @@
-# Use the official Node.js image as a base
-FROM node:22
+# ---------- Build stage ----------
+FROM node:22 AS builder
 
-# Set the working directory
-WORKDIR /usr/src/app
+WORKDIR /app
 
-# Copy package.json and package-lock.json
 COPY package*.json ./
+RUN npm install
 
-# Install dependencies
+COPY . .
+RUN npm run build
+
+
+# ---------- Runtime stage ----------
+FROM node:22-slim
+
+WORKDIR /app
+
+# Copy only production deps
+COPY package*.json ./
 RUN npm install --production
 
-# Copy the rest of the application code
-COPY . .
+# Copy compiled JS
+COPY --from=builder /app/dist ./dist
 
-# Install PM2 globally
-RUN npm install -g pm2
-
-# Expose the port your app runs on
 EXPOSE 3000
 
-# Command to run the application using PM2
-CMD ["pm2-runtime", "npm", "run", "start"]
+CMD ["node", "dist/src/index.js"]

@@ -77,6 +77,7 @@ export interface AcpJobMemo {
 
 export interface AcpJob {
   id?: string | number;
+  phase?: number;
   memos?: AcpJobMemo[];
   // Buyer/client identification - check actual SDK for correct field
   clientAddress?: string;

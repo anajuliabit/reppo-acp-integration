@@ -6,6 +6,7 @@ import { hasProcessed, markProcessed, acquireProcessingLock } from '../lib/dedup
 import { createLogger } from '../lib/logger.js';
 import type { Clients, AgentSession, AcpDeliverable, AcpJob, ParsedJobContent } from '../types.js';
 import type { Config } from '../config.js';
+import type { AcpContext } from '../acp.js';
 
 const log = createLogger('publish');
 
@@ -56,6 +57,9 @@ function getBuyerId(job: AcpJob): string | null {
   
   return buyerId;
 }
+
+// AcpJobPhases: REQUEST=0, NEGOTIATION=1, TRANSACTION=2, EVALUATION=3, COMPLETED=4
+const PHASE_TRANSACTION = 2;
 
 export async function handlePublishJob(
   job: AcpJob,
@@ -117,17 +121,27 @@ export async function handlePublishJob(
     return;
   }
 
-  // === All validations passed, now accept the job ===
-  try {
-    await job.accept('Processing X post for pod minting');
-    log.info({ jobId, tweetId }, 'Job accepted');
-  } catch (err) {
-    releaseLock();
-    throw err;
+  // === Phase-based handling ===
+  const phase = typeof job.phase === 'number' ? job.phase : -1;
+
+  // If still in negotiation, accept and wait for payment callback
+  if (phase < PHASE_TRANSACTION) {
+    try {
+      await job.accept('Processing X post for pod minting');
+      log.info({ jobId, tweetId, phase }, 'Job accepted, waiting for buyer payment...');
+    } catch (err) {
+      releaseLock();
+      throw err;
+    }
+    releaseLock(); // Release lock — we'll re-acquire when payment arrives
+    return; // Don't mint yet — onNewTask will fire again after payment
   }
 
-  // === Process the job (after accept) ===
+  // === Payment received (phase >= TRANSACTION), now do the work ===
+  log.info({ jobId, tweetId, phase }, 'Payment confirmed, processing...');
+
   try {
+
     // Fetch tweet data
     log.info({ jobId, tweetId }, 'Fetching tweet...');
     const tweet = await fetchTweet(tweetId);

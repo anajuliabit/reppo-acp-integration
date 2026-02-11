@@ -6,21 +6,25 @@
  *   BUYER_ENTITY_ID=123 \
  *   BUYER_WALLET_ADDRESS=0x... \
  *   PROVIDER_WALLET_ADDRESS=0x... \
- *   npx tsx scripts/test-job.ts <post-url>
+ *   npx tsx scripts/test-job.ts <post-url> [subnet]
  *
  * Example:
  *   npx tsx scripts/test-job.ts https://x.com/VitalikButerin/status/1234567890
+ *   npx tsx scripts/test-job.ts https://x.com/VitalikButerin/status/1234567890 ai
  *
  * Set ACP_TESTNET=true to use Base Sepolia instead of Base mainnet.
  */
 
-import AcpClient, {
+import AcpClientDefault, {
   AcpContractClientV2,
   baseAcpConfigV2,
   baseSepoliaAcpConfigV2,
   FareAmount,
   AcpJobPhases,
 } from '@virtuals-protocol/acp-node';
+
+// Handle CJS/ESM interop
+const AcpClient = (AcpClientDefault as any).default || AcpClientDefault;
 
 const REQUIRED_ENV = ['BUYER_PRIVATE_KEY', 'BUYER_ENTITY_ID', 'BUYER_WALLET_ADDRESS', 'PROVIDER_WALLET_ADDRESS'];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
@@ -56,10 +60,13 @@ console.log('[Test] ACP client initialized');
 
 // Initiate job
 console.log('[Test] Sending job...');
+const subnet = process.argv[3] || 'crypto';
+console.log(`[Test] Subnet: ${subnet}`);
+
 const jobId = await acpClient.initiateJob(
   process.env['PROVIDER_WALLET_ADDRESS']! as `0x${string}`,
-  { postUrl },
-  new FareAmount(0),
+  { postUrl, subnet },
+  new FareAmount(0, baseAcpConfigV2.baseFare),
 );
 console.log(`[Test] Job created: #${jobId}`);
 

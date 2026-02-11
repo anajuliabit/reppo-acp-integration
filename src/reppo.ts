@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from 'fs';
-import { resolve } from 'path';
+import { join } from 'path';
 import lockfile from 'proper-lockfile';
 import { fetchJSON, withRetry, isRetryableError } from './lib/http.js';
 import { createLogger } from './lib/logger.js';
@@ -7,8 +7,13 @@ import type { Config } from './config.js';
 import type { AgentSession, RegisterAgentResponse, RegisterPodResponse, SubmitMetadataParams } from './types.js';
 
 const log = createLogger('reppo');
-const SESSION_FILE = resolve('.reppo-session.json');
-const BUYER_SESSIONS_FILE = resolve('.reppo-buyer-sessions.json');
+let SESSION_FILE = '';
+let BUYER_SESSIONS_FILE = '';
+
+export function initReppoFiles(dataDir: string): void {
+  SESSION_FILE = join(dataDir, '.reppo-session.json');
+  BUYER_SESSIONS_FILE = join(dataDir, '.reppo-buyer-sessions.json');
+}
 
 // Buyer sessions keyed by wallet address
 type BuyerSessionMap = Record<string, AgentSession>;
@@ -67,20 +72,24 @@ function getAuthHeaders(session: AgentSession): Record<string, string> {
   return { Authorization: `Bearer ${session.accessToken}` };
 }
 
-export async function registerAgent(config: Config): Promise<AgentSession> {
+export async function registerAgent(
+  config: Config,
+  agentName: string,
+  agentDescription: string,
+): Promise<AgentSession> {
   const existing = loadSession();
   if (existing) {
     log.info({ agentId: existing.agentId }, 'Already registered');
     return existing;
   }
 
-  log.info('Registering agent with Reppo...');
+  log.info({ name: agentName }, 'Registering agent with Reppo...');
   const res = await withRetry(
     () => fetchJSON<RegisterAgentResponse>(`${config.REPPO_API_URL}/agents/register`, {
       method: 'POST',
       body: JSON.stringify({
-        name: config.REPPO_AGENT_NAME,
-        description: config.REPPO_AGENT_DESCRIPTION,
+        name: agentName,
+        description: agentDescription,
       }),
     }),
     'registerAgent',

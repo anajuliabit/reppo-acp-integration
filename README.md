@@ -50,17 +50,17 @@ Fill in `.env`:
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PRIVATE_KEY` | Yes | Wallet private key (32-byte hex, with or without 0x) |
-| `ACP_ENTITY_ID` | Yes | Entity ID from [Virtuals ACP](https://app.virtuals.io/acp/join) |
+| `ACP_ENTITY_ID` | Yes | Entity ID from [Virtuals ACP](https://app.virtuals.io/acp/join) (fetch via API) |
 | `ACP_WALLET_ADDRESS` | Yes | AA wallet address from Virtuals (0x-prefixed) |
 | `REPPO_API_URL` | Yes | Reppo API base URL (`https://reppo.ai/api/v1`) |
-| `REPPO_AGENT_NAME` | Yes | Agent name for Reppo registration |
-| `REPPO_AGENT_DESCRIPTION` | Yes | Agent description for Reppo registration |
 | `TWITTER_BEARER_TOKEN` | Yes | X API bearer token (app-only, read-only) |
 | `RPC_URL` | No | Custom Base RPC URL (defaults to public) |
 | `POLL_INTERVAL_MS` | No | ACP polling interval in ms (default: 10000) |
 | `ACP_TESTNET` | No | Set to `true` for Base Sepolia testnet |
 | `HEALTH_PORT` | No | Health check server port (default: 3000) |
 | `LOG_LEVEL` | No | Log level: debug, info, warn, error (default: info) |
+
+> **Note:** Agent name and description are fetched automatically from the Virtuals ACP registry on startup.
 
 ## Usage
 

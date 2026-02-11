@@ -1,5 +1,6 @@
 import { extractTweetId, fetchTweet } from '../twitter.js';
 import { mintPod } from '../chain.js';
+import { TWITTER_URL_REGEX } from '../constants.js';
 import { submitPodMetadata, getOrCreateBuyerAgent } from '../reppo.js';
 import { hasProcessed, markProcessed, acquireProcessingLock } from '../lib/dedup.js';
 import { createLogger } from '../lib/logger.js';
@@ -79,7 +80,7 @@ export async function handlePublishJob(
   }
 
   // Validate URL format
-  if (!/(?:twitter\.com|x\.com)\/\w+\/status\/\d+/.test(content.postUrl)) {
+  if (!TWITTER_URL_REGEX.test(content.postUrl)) {
     log.warn({ jobId, url: content.postUrl }, 'Invalid URL format');
     await job.reject(`Invalid X/Twitter URL: ${content.postUrl}`);
     return;
@@ -165,7 +166,7 @@ export async function handlePublishJob(
       description: tweet.text,
       url: content.postUrl,
       imageURL: tweet.mediaUrls[0],
-      tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
+      tokenId: mintResult.podId !== undefined ? mintResult.podId.toString() : undefined,
       subnet: content.subnet,
     });
 

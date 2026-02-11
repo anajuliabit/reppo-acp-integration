@@ -35,6 +35,9 @@ export const QUOTER_ABI = parseAbi([
   'function quoteExactOutputSingle((address tokenIn, address tokenOut, uint256 amount, uint24 fee, uint160 sqrtPriceLimitX96)) returns (uint256 amountIn, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
 ]);
 
+/** Regex to match X/Twitter post URLs and capture the tweet ID */
+export const TWITTER_URL_REGEX = /(?:twitter\.com|x\.com)\/\w+\/status\/(\d+)/;
+
 // Uniswap V3 SwapRouter02 ABI (with deadline via multicall)
 export const SWAP_ROUTER_ABI = parseAbi([
   'function exactOutputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountOut, uint256 amountInMaximum, uint160 sqrtPriceLimitX96)) payable returns (uint256 amountIn)',

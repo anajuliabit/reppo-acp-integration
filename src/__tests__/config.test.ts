@@ -12,8 +12,6 @@ describe('loadConfig', () => {
     ACP_ENTITY_ID: '123',
     ACP_WALLET_ADDRESS: VALID_WALLET_ADDRESS,
     REPPO_API_URL: 'https://reppo.ai/api/v1',
-    REPPO_AGENT_NAME: 'reppodant',
-    REPPO_AGENT_DESCRIPTION: 'Test agent',
     TWITTER_BEARER_TOKEN: 'test-bearer-token',
   };
 
@@ -41,7 +39,6 @@ describe('loadConfig', () => {
     expect(config.ACP_ENTITY_ID).toBe(123);
     expect(config.ACP_WALLET_ADDRESS).toBe(VALID_WALLET_ADDRESS);
     expect(config.REPPO_API_URL).toBe('https://reppo.ai/api/v1');
-    expect(config.REPPO_AGENT_NAME).toBe('reppodant');
     expect(config.TWITTER_BEARER_TOKEN).toBe('test-bearer-token');
     expect(config.RPC_URL).toBeUndefined();
     expect(config.POLL_INTERVAL_MS).toBe(10_000);

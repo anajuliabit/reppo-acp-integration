@@ -1,4 +1,6 @@
-import AcpClient, { AcpContractClientV2, baseAcpConfigV2, baseSepoliaAcpConfigV2 } from '@virtuals-protocol/acp-node';
+import _AcpModule, { AcpContractClientV2, baseAcpConfigV2, baseSepoliaAcpConfigV2 } from '@virtuals-protocol/acp-node';
+// Handle ESM default export
+const AcpClient = (_AcpModule as any).default ?? _AcpModule;
 import type { Config } from './config.js';
 import { handlePublishJob } from './handlers/publish.js';
 import { createLogger } from './lib/logger.js';
@@ -6,8 +8,19 @@ import type { Clients, AgentSession, AcpJob } from './types.js';
 
 const log = createLogger('acp');
 
+function validateAcpJob(job: unknown): AcpJob {
+  if (!job || typeof job !== 'object') {
+    throw new Error('Invalid ACP job: expected an object');
+  }
+  const j = job as Record<string, unknown>;
+  if (typeof j.accept !== 'function' || typeof j.reject !== 'function' || typeof j.deliver !== 'function') {
+    throw new Error('Invalid ACP job: missing required lifecycle methods (accept/reject/deliver)');
+  }
+  return job as AcpJob;
+}
+
 export interface AcpContext {
-  client: AcpClient;
+  client: InstanceType<typeof AcpClient>;
 }
 
 export async function initAcp(
@@ -15,18 +28,21 @@ export async function initAcp(
   clients: Clients,
   session: AgentSession,
 ): Promise<AcpContext> {
-  const pk = config.PRIVATE_KEY.startsWith('0x') ? config.PRIVATE_KEY : `0x${config.PRIVATE_KEY}`;
+  // PRIVATE_KEY is already 0x-normalized by loadConfig()
+  const pk = config.PRIVATE_KEY as `0x${string}`;
 
   const acpConfig = config.ACP_TESTNET ? baseSepoliaAcpConfigV2 : baseAcpConfigV2;
 
   log.info({ 
-    entityId: config.ACP_ENTITY_ID, 
+    entityId: config.ACP_ENTITY_ID,
+    signerEntityId: config.ACP_SIGNER_ENTITY_ID,
     testnet: config.ACP_TESTNET,
   }, 'Building ACP contract client...');
 
+  // Use signer entity ID for the SDK (validation module uses different IDs than ACP registry)
   const contractClient = await AcpContractClientV2.build(
-    pk as `0x${string}`,
-    config.ACP_ENTITY_ID,
+    pk,
+    config.ACP_SIGNER_ENTITY_ID,
     config.ACP_WALLET_ADDRESS as `0x${string}`,
     acpConfig,
   );
@@ -34,7 +50,7 @@ export async function initAcp(
   const acpClient = new AcpClient({
     acpContractClient: contractClient,
     onNewTask: async (job: unknown) => {
-      const typedJob = job as AcpJob;
+      const typedJob = validateAcpJob(job);
       const jobId = typedJob.id ?? 'unknown';
       log.info({ jobId }, 'New task received');
       
@@ -52,7 +68,7 @@ export async function initAcp(
       }
     },
     onEvaluate: async (job: unknown) => {
-      const typedJob = job as AcpJob;
+      const typedJob = validateAcpJob(job);
       const jobId = typedJob.id ?? 'unknown';
       log.info({ jobId }, 'Evaluate request received');
       

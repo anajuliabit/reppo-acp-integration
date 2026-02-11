@@ -1,11 +1,11 @@
 import { existsSync, readFileSync, writeFileSync } from 'fs';
-import { resolve } from 'path';
+import { join } from 'path';
 import lockfile from 'proper-lockfile';
 import { createLogger } from './logger.js';
 import type { DedupState } from '../types.js';
 
 const log = createLogger('dedup');
-const DEDUP_FILE = resolve('.reppo-dedup.json');
+let DEDUP_FILE = '';
 const MAX_ENTRIES = 10_000; // Prevent unbounded growth
 
 // In-memory cache for fast lookups
@@ -33,7 +33,10 @@ function saveState(state: DedupState): void {
 /**
  * Initialize dedup cache from disk
  */
-export function initDedup(): void {
+export function initDedup(dataDir?: string): void {
+  if (dataDir) {
+    DEDUP_FILE = join(dataDir, '.reppo-dedup.json');
+  }
   const state = loadState();
   cache = new Set(state.processedTweets);
   log.info({ count: cache.size }, 'Loaded dedup state');
@@ -65,16 +68,17 @@ export async function markProcessed(tweetId: string): Promise<void> {
     }
     
     release = await lockfile.lock(DEDUP_FILE, { retries: 3 });
-    
+
     const state = loadState();
-    if (!state.processedTweets.includes(tweetId)) {
+    const existing = new Set(state.processedTweets);
+    if (!existing.has(tweetId)) {
       state.processedTweets.push(tweetId);
-      
+
       // Trim old entries if needed
       if (state.processedTweets.length > MAX_ENTRIES) {
         state.processedTweets = state.processedTweets.slice(-MAX_ENTRIES);
       }
-      
+
       state.lastUpdated = new Date().toISOString();
       saveState(state);
     }

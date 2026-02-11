@@ -33,9 +33,8 @@ import type { Clients, MintResult } from './types.js';
 const log = createLogger('chain');
 
 export function createClients(privateKey: string, rpcUrl?: string): Clients {
-  const account = privateKeyToAccount(
-    privateKey.startsWith('0x') ? (privateKey as `0x${string}`) : `0x${privateKey}`,
-  );
+  // privateKey is already 0x-normalized by loadConfig()
+  const account = privateKeyToAccount(privateKey as `0x${string}`);
   const transport = rpcUrl ? http(rpcUrl) : http();
   const publicClient = createPublicClient({ chain: base, transport });
   const walletClient = createWalletClient({ account, chain: base, transport });
@@ -158,8 +157,9 @@ export async function swapUsdcToReppo(
   // Get quote to determine actual USDC needed + correct pool fee
   const quote = await getSwapQuote(clients, amountOut);
   
-  // Add slippage buffer
-  const amountInWithSlippage = quote.amountIn + (quote.amountIn * BigInt(SWAP_SLIPPAGE_BPS) / 10000n);
+  // Add slippage buffer (minimum 1 unit to avoid zero buffer from integer truncation)
+  const slippageBuffer = quote.amountIn * BigInt(SWAP_SLIPPAGE_BPS) / 10000n;
+  const amountInWithSlippage = quote.amountIn + (slippageBuffer > 0n ? slippageBuffer : 1n);
   
   log.info({
     amountOut: formatUnits(amountOut, 18),
@@ -276,7 +276,7 @@ export async function ensureReppoBalance(clients: Clients, feeNeeded: bigint): P
   }
 }
 
-function extractPodId(receipt: TransactionReceipt): bigint | undefined {
+export function extractPodId(receipt: TransactionReceipt): bigint | undefined {
   for (const log of receipt.logs) {
     try {
       const event = decodeEventLog({

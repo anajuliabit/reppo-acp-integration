@@ -1,17 +1,21 @@
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import 'dotenv/config';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export interface Config {
   PRIVATE_KEY: string;
   ACP_ENTITY_ID: number;
+  ACP_SIGNER_ENTITY_ID: number;
   ACP_WALLET_ADDRESS: string;
   REPPO_API_URL: string;
-  REPPO_AGENT_NAME: string;
-  REPPO_AGENT_DESCRIPTION: string;
   TWITTER_BEARER_TOKEN: string;
   RPC_URL?: string;
   POLL_INTERVAL_MS: number;
   ACP_TESTNET: boolean;
   HEALTH_PORT: number;
+  DATA_DIR: string;
 }
 
 const REQUIRED_VARS = [
@@ -19,8 +23,6 @@ const REQUIRED_VARS = [
   'ACP_ENTITY_ID',
   'ACP_WALLET_ADDRESS',
   'REPPO_API_URL',
-  'REPPO_AGENT_NAME',
-  'REPPO_AGENT_DESCRIPTION',
   'TWITTER_BEARER_TOKEN',
 ] as const;
 
@@ -62,14 +64,74 @@ export function loadConfig(): Config {
   return {
     PRIVATE_KEY: privateKey,
     ACP_ENTITY_ID: parseInteger(process.env['ACP_ENTITY_ID'], 'ACP_ENTITY_ID'),
+    ACP_SIGNER_ENTITY_ID: parseInteger(process.env['ACP_SIGNER_ENTITY_ID'], 'ACP_SIGNER_ENTITY_ID', parseInteger(process.env['ACP_ENTITY_ID'], 'ACP_ENTITY_ID')),
     ACP_WALLET_ADDRESS: walletAddress,
     REPPO_API_URL: process.env['REPPO_API_URL']!,
-    REPPO_AGENT_NAME: process.env['REPPO_AGENT_NAME']!,
-    REPPO_AGENT_DESCRIPTION: process.env['REPPO_AGENT_DESCRIPTION']!,
     TWITTER_BEARER_TOKEN: process.env['TWITTER_BEARER_TOKEN']!,
     RPC_URL: process.env['RPC_URL'] || undefined,
-    POLL_INTERVAL_MS: parseInteger(process.env['POLL_INTERVAL_MS'], 'POLL_INTERVAL_MS', 10_000),
+    POLL_INTERVAL_MS: Math.max(1000, parseInteger(process.env['POLL_INTERVAL_MS'], 'POLL_INTERVAL_MS', 10_000)),
     ACP_TESTNET: process.env['ACP_TESTNET'] === 'true',
     HEALTH_PORT: parseInteger(process.env['HEALTH_PORT'], 'HEALTH_PORT', 3000),
+    DATA_DIR: process.env['DATA_DIR'] || resolve(__dirname, '..'),
   };
+}
+
+export interface AcpAgentInfo {
+  id: number;
+  name: string;
+  description: string;
+  walletAddress: string;
+}
+
+export async function fetchAcpAgentInfo(walletAddress: string, testnet: boolean): Promise<AcpAgentInfo> {
+  const baseUrl = testnet ? 'https://acpx.virtuals.gg' : 'https://acpx.virtuals.io';
+  const url = `${baseUrl}/api/agents?filters[walletAddress]=${walletAddress}`;
+  
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ACP agent info: ${response.status} ${response.statusText}`);
+  }
+  
+  const data = await response.json() as { data: AcpAgentInfo[] };
+  if (!data.data || data.data.length === 0) {
+    throw new Error(`No agent found for wallet ${walletAddress}`);
+  }
+  
+  const agent = data.data[0];
+  return {
+    id: agent.id,
+    name: agent.name,
+    description: agent.description || agent.name,
+    walletAddress: agent.walletAddress,
+  };
+}
+
+// Get agent info by entity ID, falling back to hardcoded values if API fails
+export async function fetchAcpAgentInfoById(entityId: number, testnet: boolean, walletAddress: string): Promise<AcpAgentInfo> {
+  try {
+    // Try to fetch by wallet first
+    const agent = await fetchAcpAgentInfo(walletAddress, testnet);
+    
+    // If entity ID doesn't match, log warning and use hardcoded values
+    if (agent.id !== entityId) {
+      console.warn(`Entity mismatch: expected ${entityId}, got ${agent.id}. Using hardcoded values.`);
+      return {
+        id: entityId,
+        name: 'Reppodant',
+        description: '@reppodant on Virtuals Protocol ACP v2, accepts jobs to mint X posts as pods on Reppo',
+        walletAddress,
+      };
+    }
+    
+    return agent;
+  } catch (error) {
+    // Fallback to hardcoded values
+    console.warn(`Failed to fetch agent info, using hardcoded values: ${error}`);
+    return {
+      id: entityId,
+      name: 'Reppodant',
+      description: '@reppodant on Virtuals Protocol ACP v2, accepts jobs to mint X posts as pods on Reppo',
+      walletAddress,
+    };
+  }
 }

@@ -1,6 +1,6 @@
 import http from 'http';
-import { loadConfig } from './config.js';
-import { registerAgent } from './reppo.js';
+import { loadConfig, fetchAcpAgentInfoById } from './config.js';
+import { registerAgent, initReppoFiles } from './reppo.js';
 import { createClients } from './chain.js';
 import { initTwitterClient } from './twitter.js';
 import { initAcp } from './acp.js';
@@ -48,26 +48,45 @@ function createHealthServer(port: number) {
 }
 
 async function main() {
+  // Register global error handlers first, before any async work
+  process.on('uncaughtException', (err) => {
+    log.fatal({ error: err.message, stack: err.stack }, 'Uncaught exception');
+    process.exit(1);
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    log.fatal({ reason }, 'Unhandled rejection');
+    process.exit(1);
+  });
+
   log.info('Starting Reppo ACP Agent...');
 
   // Load and validate config
   const config = loadConfig();
   log.info({
-    agent: config.REPPO_AGENT_NAME,
     entityId: config.ACP_ENTITY_ID,
+    walletAddress: config.ACP_WALLET_ADDRESS,
     pollInterval: config.POLL_INTERVAL_MS,
     testnet: config.ACP_TESTNET,
   }, 'Config loaded');
 
-  // Initialize dedup state
-  initDedup();
+  // Fetch agent info from Virtuals ACP (by entity ID with fallback)
+  log.info('Fetching agent info from Virtuals ACP...');
+  const acpAgent = await fetchAcpAgentInfoById(config.ACP_ENTITY_ID, config.ACP_TESTNET, config.ACP_WALLET_ADDRESS);
+  log.info({
+    name: acpAgent.name,
+    description: acpAgent.description?.slice(0, 50) + '...',
+  }, 'ACP agent info loaded');
+
+  // Initialize file paths and dedup state
+  initReppoFiles(config.DATA_DIR);
+  initDedup(config.DATA_DIR);
 
   // Start health server
   const healthServer = createHealthServer(config.HEALTH_PORT);
 
-  /*
-  // Register with Reppo API
-  const session = await registerAgent(config);
+  // Register with Reppo API (using name/description from ACP)
+  const session = await registerAgent(config, acpAgent.name, acpAgent.description);
   log.info({ agentId: session.agentId }, 'Reppo session ready');
 
   // Init chain clients
@@ -124,19 +143,6 @@ async function main() {
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
-  
-  // Handle uncaught errors
-  process.on('uncaughtException', (err) => {
-    log.fatal({ error: err.message, stack: err.stack }, 'Uncaught exception');
-    process.exit(1);
-  });
-  
-  process.on('unhandledRejection', (reason) => {
-    log.fatal({ reason }, 'Unhandled rejection');
-    process.exit(1);
-  });
-
-  */
 }
 
 main().catch((err) => {

@@ -1,4 +1,5 @@
 import { TwitterApi } from 'twitter-api-v2';
+import { TWITTER_URL_REGEX } from './constants.js';
 import { withRetry } from './lib/http.js';
 import { createLogger } from './lib/logger.js';
 import type { TweetData } from './types.js';
@@ -17,7 +18,7 @@ function getClient(): TwitterApi {
 }
 
 export function extractTweetId(url: string): string {
-  const match = url.match(/(?:twitter\.com|x\.com)\/\w+\/status\/(\d+)/);
+  const match = url.match(TWITTER_URL_REGEX);
   if (!match?.[1]) {
     throw new Error(`Invalid X/Twitter URL: ${url}`);
   }

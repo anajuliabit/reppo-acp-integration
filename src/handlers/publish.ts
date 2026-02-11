@@ -124,11 +124,14 @@ export async function handlePublishJob(
   // === Phase-based handling ===
   const phase = typeof job.phase === 'number' ? job.phase : -1;
 
-  // If still in negotiation, accept and wait for payment callback
+  // If still in negotiation, accept + create requirement memo, then wait for payment
   if (phase < PHASE_TRANSACTION) {
     try {
       await job.accept('Processing X post for pod minting');
-      log.info({ jobId, tweetId, phase }, 'Job accepted, waiting for buyer payment...');
+      log.info({ jobId, tweetId, phase }, 'Job accepted');
+      // Create requirement memo (nextPhase=TRANSACTION) so buyer can pay
+      await (job as any).createRequirement('Processing X post for pod minting');
+      log.info({ jobId }, 'Requirement memo created, waiting for buyer payment...');
     } catch (err) {
       releaseLock();
       throw err;

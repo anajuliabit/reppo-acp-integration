@@ -32,6 +32,16 @@ import type { Clients, MintResult } from './types.js';
 
 const log = createLogger('chain');
 
+// AA wallet funding function — set by setAaFundingSource()
+let _aaFundFn: ((to: Address, amount: bigint) => Promise<void>) | null = null;
+
+/**
+ * Register an AA wallet funding function that transfers USDC from the AA wallet to a target address.
+ */
+export function setAaFundingSource(fn: (to: Address, amount: bigint) => Promise<void>): void {
+  _aaFundFn = fn;
+}
+
 export function createClients(privateKey: string, rpcUrl?: string): Clients {
   // privateKey is already 0x-normalized by loadConfig()
   const account = privateKeyToAccount(privateKey as `0x${string}`);
@@ -168,10 +178,20 @@ export async function swapUsdcToReppo(
     fee: quote.fee,
   }, 'Preparing swap');
 
-  // Check USDC balance
-  const usdcBalance = await getUsdcBalance(clients, account.address);
-  log.info({ balance: formatUnits(usdcBalance, 6), needed: formatUnits(amountInWithSlippage, 6) }, 'USDC balance');
+  // Check USDC balance on EOA
+  let usdcBalance = await getUsdcBalance(clients, account.address);
+  log.info({ balance: formatUnits(usdcBalance, 6), needed: formatUnits(amountInWithSlippage, 6) }, 'EOA USDC balance');
   
+  // If EOA doesn't have enough, try to fund from AA wallet
+  if (usdcBalance < amountInWithSlippage && _aaFundFn) {
+    const shortfall = amountInWithSlippage - usdcBalance;
+    log.info({ shortfall: formatUnits(shortfall, 6) }, 'Funding EOA from AA wallet...');
+    await _aaFundFn(account.address, shortfall);
+    // Re-check balance after transfer
+    usdcBalance = await getUsdcBalance(clients, account.address);
+    log.info({ balance: formatUnits(usdcBalance, 6) }, 'EOA USDC balance after AA transfer');
+  }
+
   if (usdcBalance < amountInWithSlippage) {
     throw new Error(
       `Insufficient USDC for swap. Need up to ${formatUnits(amountInWithSlippage, 6)}, have ${formatUnits(usdcBalance, 6)}`,

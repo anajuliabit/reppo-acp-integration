@@ -27,7 +27,8 @@ export interface SubmitMetadataParams {
   description?: string;
   url: string;
   imageURL?: string;
-  tokenId?: string;
+  tokenId?: number;
+  category?: string;
   subnet: string;
 }
 

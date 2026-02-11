@@ -22,10 +22,15 @@ function parseJobContent(job: AcpJob): ParsedJobContent {
         ? JSON.parse(memo.content) 
         : memo.content;
       
+      // Check top-level and nested under "requirement" (ACP SDK wraps serviceRequirements there)
+      const req = content?.requirement ?? content;
+      if (req?.postUrl && !result.postUrl) result.postUrl = req.postUrl;
+      if (req?.subnet && !result.subnet) result.subnet = req.subnet;
+      if (req?.agentName && !result.agentName) result.agentName = req.agentName;
+      if (req?.agentDescription && !result.agentDescription) result.agentDescription = req.agentDescription;
+      // Also check top-level in case it's not nested
       if (content?.postUrl && !result.postUrl) result.postUrl = content.postUrl;
       if (content?.subnet && !result.subnet) result.subnet = content.subnet;
-      if (content?.agentName && !result.agentName) result.agentName = content.agentName;
-      if (content?.agentDescription && !result.agentDescription) result.agentDescription = content.agentDescription;
     } catch {
       // Not JSON, skip
     }
@@ -166,7 +171,8 @@ export async function handlePublishJob(
       description: tweet.text,
       url: content.postUrl,
       imageURL: tweet.mediaUrls[0],
-      tokenId: mintResult.podId !== undefined ? mintResult.podId.toString() : undefined,
+      tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
+      category: 'social',
       subnet: content.subnet,
     });
 

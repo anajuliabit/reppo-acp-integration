@@ -1,7 +1,8 @@
 import http from 'http';
+import { encodeFunctionData } from 'viem';
 import { loadConfig, fetchAcpAgentInfoById } from './config.js';
 import { registerAgent, initReppoFiles } from './reppo.js';
-import { createClients } from './chain.js';
+import { createClients, setAaFundingSource } from './chain.js';
 import { initTwitterClient } from './twitter.js';
 import { initAcp } from './acp.js';
 import { initDedup, getProcessedCount } from './lib/dedup.js';
@@ -93,13 +94,33 @@ async function main() {
   const clients = createClients(config.PRIVATE_KEY, config.RPC_URL);
   log.info({ wallet: clients.account.address }, 'Chain clients ready');
 
-  // Init Twitter client
-  initTwitterClient(config.TWITTER_BEARER_TOKEN);
+  initTwitterClient({
+    appKey: config.TWITTER_API_KEY,
+    appSecret: config.TWITTER_API_SECRET,
+    accessToken: config.TWITTER_ACCESS_TOKEN,
+    accessSecret: config.TWITTER_ACCESS_TOKEN_SECRET,
+  });
   log.info('Twitter client ready');
 
   // Init ACP client
   const acp = await initAcp(config, clients, session);
   log.info('ACP client ready, listening for jobs...');
+
+  // Set up AA → EOA USDC funding via the ACP session key client
+  const USDC_ABI = [{ name: 'transfer', type: 'function', inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ name: '', type: 'bool' }], stateMutability: 'nonpayable' }] as const;
+  setAaFundingSource(async (to, amount) => {
+    const skClient = acp.contractClient.sessionKeyClient;
+    log.info({ to, amount: amount.toString() }, 'Transferring USDC from AA to EOA...');
+    const result = await skClient.sendUserOperation({
+      uo: {
+        target: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`, // USDC on Base
+        data: encodeFunctionData({ abi: USDC_ABI, functionName: 'transfer', args: [to, amount] }),
+        value: 0n,
+      },
+    });
+    const txHash = await skClient.waitForUserOperationTransaction(result);
+    log.info({ txHash }, 'AA → EOA USDC transfer complete');
+  });
 
   // Mark as healthy
   serviceState.healthy = true;

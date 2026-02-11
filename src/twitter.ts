@@ -7,8 +7,13 @@ import type { TweetData } from './types.js';
 const log = createLogger('twitter');
 let _client: TwitterApi | null = null;
 
-export function initTwitterClient(bearerToken: string): TwitterApi {
-  _client = new TwitterApi(bearerToken);
+export function initTwitterClient(credentials: {
+  appKey: string;
+  appSecret: string;
+  accessToken: string;
+  accessSecret: string;
+}): TwitterApi {
+  _client = new TwitterApi(credentials);
   return _client;
 }
 
@@ -25,23 +30,11 @@ export function extractTweetId(url: string): string {
   return match[1];
 }
 
-/**
- * Check if Twitter API error is retryable
- */
 function isRetryableTwitterError(error: Error): boolean {
   const message = error.message.toLowerCase();
-  // Rate limits
-  if (message.includes('429') || message.includes('rate limit') || message.includes('too many requests')) {
-    return true;
-  }
-  // Server errors
-  if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('504')) {
-    return true;
-  }
-  // Network errors
-  if (message.includes('network') || message.includes('timeout') || message.includes('econnreset')) {
-    return true;
-  }
+  if (message.includes('429') || message.includes('rate limit') || message.includes('too many requests')) return true;
+  if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('504')) return true;
+  if (message.includes('network') || message.includes('timeout') || message.includes('econnreset')) return true;
   return false;
 }
 
@@ -63,8 +56,8 @@ export async function fetchTweet(tweetId: string): Promise<TweetData> {
     'fetchTweet',
     { 
       shouldRetry: isRetryableTwitterError,
-      maxRetries: 5, // More retries for Twitter rate limits
-      baseDelay: 2000, // Longer base delay
+      maxRetries: 5,
+      baseDelay: 2000,
     },
   );
 

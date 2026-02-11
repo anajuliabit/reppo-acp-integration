@@ -10,7 +10,10 @@ export interface Config {
   ACP_SIGNER_ENTITY_ID: number;
   ACP_WALLET_ADDRESS: string;
   REPPO_API_URL: string;
-  TWITTER_BEARER_TOKEN: string;
+  TWITTER_API_KEY: string;
+  TWITTER_API_SECRET: string;
+  TWITTER_ACCESS_TOKEN: string;
+  TWITTER_ACCESS_TOKEN_SECRET: string;
   RPC_URL?: string;
   POLL_INTERVAL_MS: number;
   ACP_TESTNET: boolean;
@@ -23,7 +26,10 @@ const REQUIRED_VARS = [
   'ACP_ENTITY_ID',
   'ACP_WALLET_ADDRESS',
   'REPPO_API_URL',
-  'TWITTER_BEARER_TOKEN',
+  'TWITTER_API_KEY',
+  'TWITTER_API_SECRET',
+  'TWITTER_ACCESS_TOKEN',
+  'TWITTER_ACCESS_TOKEN_SECRET',
 ] as const;
 
 function parseInteger(value: string | undefined, name: string, defaultValue?: number): number {
@@ -67,7 +73,10 @@ export function loadConfig(): Config {
     ACP_SIGNER_ENTITY_ID: parseInteger(process.env['ACP_SIGNER_ENTITY_ID'], 'ACP_SIGNER_ENTITY_ID', parseInteger(process.env['ACP_ENTITY_ID'], 'ACP_ENTITY_ID')),
     ACP_WALLET_ADDRESS: walletAddress,
     REPPO_API_URL: process.env['REPPO_API_URL']!,
-    TWITTER_BEARER_TOKEN: process.env['TWITTER_BEARER_TOKEN']!,
+    TWITTER_API_KEY: process.env['TWITTER_API_KEY']!,
+    TWITTER_API_SECRET: process.env['TWITTER_API_SECRET']!,
+    TWITTER_ACCESS_TOKEN: process.env['TWITTER_ACCESS_TOKEN']!,
+    TWITTER_ACCESS_TOKEN_SECRET: process.env['TWITTER_ACCESS_TOKEN_SECRET']!,
     RPC_URL: process.env['RPC_URL'] || undefined,
     POLL_INTERVAL_MS: Math.max(1000, parseInteger(process.env['POLL_INTERVAL_MS'], 'POLL_INTERVAL_MS', 10_000)),
     ACP_TESTNET: process.env['ACP_TESTNET'] === 'true',

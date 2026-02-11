@@ -21,6 +21,7 @@ function validateAcpJob(job: unknown): AcpJob {
 
 export interface AcpContext {
   client: InstanceType<typeof AcpClient>;
+  contractClient: InstanceType<typeof AcpContractClientV2>;
 }
 
 export async function initAcp(
@@ -84,5 +85,5 @@ export async function initAcp(
   await acpClient.init();
   log.info('ACP client initialized');
 
-  return { client: acpClient };
+  return { client: acpClient, contractClient };
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { keccak256, toHex, pad, type TransactionReceipt } from 'viem';
-import { extractPodId, createClients, ensureReppoBalance } from '../chain.js';
+import { extractPodId, createClients } from '../chain.js';
 
 // Mock logger
 vi.mock('../lib/logger.js', () => ({
@@ -110,56 +110,3 @@ describe('createClients', () => {
   });
 });
 
-describe('ensureReppoBalance', () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('does nothing when balance is sufficient', async () => {
-    const mockClients = {
-      account: { address: '0x1234567890abcdef1234567890abcdef12345678' },
-      publicClient: {
-        readContract: vi.fn().mockResolvedValue(1000n),
-      },
-    } as any;
-
-    await ensureReppoBalance(mockClients, 500n);
-
-    // readContract called once for balance check
-    expect(mockClients.publicClient.readContract).toHaveBeenCalledTimes(1);
-  });
-
-  it('throws when swap still leaves insufficient balance', async () => {
-    let callCount = 0;
-    const mockClients = {
-      account: { address: '0x1234567890abcdef1234567890abcdef12345678' },
-      publicClient: {
-        readContract: vi.fn().mockImplementation(async (params: any) => {
-          if (params.functionName === 'balanceOf' && params.address === '0xFf8104251E7761163faC3211eF5583FB3F8583d6') {
-            callCount++;
-            // First call: low balance, second call: still low after swap
-            return callCount === 1 ? 100n : 200n;
-          }
-          if (params.functionName === 'quoteExactOutputSingle') {
-            return [50n, 0n, 0, 0n]; // quote
-          }
-          if (params.functionName === 'balanceOf') {
-            return 10000n; // USDC balance
-          }
-          if (params.functionName === 'allowance') {
-            return 10000n; // already approved
-          }
-          return 0n;
-        }),
-        waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: 'success' }),
-      },
-      walletClient: {
-        writeContract: vi.fn().mockResolvedValue('0x' + 'b'.repeat(64)),
-      },
-    } as any;
-
-    await expect(ensureReppoBalance(mockClients, 1000n)).rejects.toThrow(
-      'Swap completed but still insufficient REPPO',
-    );
-  });
-});

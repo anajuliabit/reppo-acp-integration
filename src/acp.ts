@@ -3,6 +3,7 @@ import _AcpModule, { AcpContractClientV2, baseAcpConfigV2, baseSepoliaAcpConfigV
 const AcpClient = (_AcpModule as any).default ?? _AcpModule;
 import type { Config } from './config.js';
 import { handlePublishJob } from './handlers/publish.js';
+import { verifyMintTx } from './lib/verify.js';
 import { createLogger } from './lib/logger.js';
 import type { Clients, AgentSession, AcpJob } from './types.js';
 
@@ -74,10 +75,34 @@ export async function initAcp(
       log.info({ jobId }, 'Evaluate request received');
       
       try {
-        await typedJob.evaluate(true, 'Auto-approved by reppodant');
-        log.info({ jobId }, 'Job auto-approved');
+        // Extract deliverable from memos to verify the mint tx
+        const deliverableMemo = (typedJob.memos || [])
+          .map((m: any) => {
+            try { return typeof m.content === 'string' ? JSON.parse(m.content) : m.content; } 
+            catch { return null; }
+          })
+          .find((d: any) => d?.txHash);
+
+        if (!deliverableMemo?.txHash) {
+          log.warn({ jobId }, 'No txHash in deliverable, rejecting evaluation');
+          await typedJob.evaluate(false, 'No transaction hash found in deliverable');
+          return;
+        }
+
+        // Verify the mint tx on-chain
+        const verified = await verifyMintTx(deliverableMemo.txHash, config.ACP_TESTNET);
+        if (verified) {
+          await typedJob.evaluate(true, `Pod mint verified on-chain: ${deliverableMemo.txHash}`);
+          log.info({ jobId, txHash: deliverableMemo.txHash }, 'Evaluation approved — mint tx verified');
+        } else {
+          await typedJob.evaluate(false, `Mint tx failed or not found: ${deliverableMemo.txHash}`);
+          log.warn({ jobId, txHash: deliverableMemo.txHash }, 'Evaluation rejected — mint tx not verified');
+        }
       } catch (err) {
         log.error({ jobId, error: (err as Error).message }, 'Evaluation failed');
+        try {
+          await typedJob.evaluate(false, `Evaluation error: ${(err as Error).message}`);
+        } catch {}
       }
     },
   });

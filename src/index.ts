@@ -1,7 +1,7 @@
 import http from 'http';
 import { loadConfig, fetchAcpAgentInfoById } from './config.js';
 import { registerAgent, initReppoFiles } from './reppo.js';
-import { createClients } from './chain.js';
+import { createClients, setAaClient } from './chain.js';
 import { initTwitterClient } from './twitter.js';
 import { initAcp } from './acp.js';
 import { initDedup, getProcessedCount } from './lib/dedup.js';
@@ -104,6 +104,10 @@ async function main() {
   // Init ACP client
   const acp = await initAcp(config, clients, session);
   log.info('ACP client ready, listening for jobs...');
+
+  // Wire up AA client for gasless transactions (Alchemy paymaster)
+  setAaClient(clients, acp.contractClient, config.ACP_WALLET_ADDRESS as `0x${string}`);
+  log.info({ aaWallet: config.ACP_WALLET_ADDRESS }, 'AA client wired for gasless transactions');
 
   // Mark as healthy
   serviceState.healthy = true;

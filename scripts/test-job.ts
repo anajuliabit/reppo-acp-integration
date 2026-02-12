@@ -66,7 +66,7 @@ console.log(`[Test] Subnet: ${subnet}`);
 const jobId = await acpClient.initiateJob(
   process.env['PROVIDER_WALLET_ADDRESS']! as `0x${string}`,
   { postUrl, subnet },
-  new FareAmount(0, baseAcpConfigV2.baseFare),
+  new FareAmount(5, baseAcpConfigV2.baseFare),
 );
 console.log(`[Test] Job created: #${jobId}`);
 

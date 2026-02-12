@@ -4,6 +4,8 @@ import {
   http,
   formatUnits,
   decodeEventLog,
+  encodeFunctionData,
+  type Hash,
   type Address,
   type TransactionReceipt,
 } from 'viem';
@@ -29,6 +31,11 @@ export function createClients(privateKey: string, rpcUrl?: string): Clients {
   const publicClient = createPublicClient({ chain: base, transport });
   const walletClient = createWalletClient({ account, chain: base, transport });
   return { account, publicClient, walletClient } as Clients;
+}
+
+export function setAaClient(clients: Clients, contractClient: Clients['contractClient'], aaWalletAddress: `0x${string}`): void {
+  clients.contractClient = contractClient;
+  clients.aaWalletAddress = aaWalletAddress;
 }
 
 export async function getPublishingFee(clients: Clients): Promise<bigint> {
@@ -91,67 +98,105 @@ export function extractPodId(receipt: TransactionReceipt): bigint | undefined {
 }
 
 export async function mintPod(clients: Clients): Promise<MintResult> {
-  const { account, publicClient, walletClient } = clients;
+  const { account, publicClient, walletClient, contractClient, aaWalletAddress } = clients;
+  const useAA = contractClient && aaWalletAddress;
 
   const fee = await getPublishingFee(clients);
-  log.info({ fee: formatUnits(fee, 18) }, 'Publishing fee');
+  log.info({ fee: formatUnits(fee, 18), useAA }, 'Publishing fee');
 
   if (fee > 0n) {
-    // Check REPPO balance directly (no swap)
-    const reppoBalance = await getReppoBalance(clients, account.address);
+    // Check REPPO balance on the address that will pay (AA or EOA)
+    const payerAddress = aaWalletAddress ?? account.address;
+    const reppoBalance = await getReppoBalance(clients, payerAddress);
     if (reppoBalance < fee) {
       throw new Error(
         `Insufficient REPPO. Need ${formatUnits(fee, 18)}, have ${formatUnits(reppoBalance, 18)}. ` +
-        `Please fund ${account.address} with REPPO tokens.`
+        `Please fund ${payerAddress} with REPPO tokens.`
       );
     }
-    log.info({ balance: formatUnits(reppoBalance, 18) }, 'REPPO balance sufficient');
+    log.info({ balance: formatUnits(reppoBalance, 18), payer: payerAddress }, 'REPPO balance sufficient');
 
     // Approve REPPO spend for minting
-    const allowance = await getAllowance(clients, account.address);
+    const allowance = await getAllowance(clients, payerAddress);
     if (allowance < fee) {
-      log.info('Approving REPPO spend...');
-      const approveTx = await withRetry(
-        () => walletClient.writeContract({
-          address: REPPO_TOKEN,
+      log.info({ useAA }, 'Approving REPPO spend...');
+
+      if (useAA) {
+        // Use AA execution via sessionKeyClient (covered by Alchemy paymaster)
+        const approveData = encodeFunctionData({
           abi: ERC20_ABI,
           functionName: 'approve',
           args: [POD_CONTRACT, fee],
-          chain: base,
-          account,
-        }),
-        'approveREPPO',
-        { shouldRetry: isRetryableError },
-      );
-      log.info({ tx: approveTx }, 'Approve tx submitted');
-      const approveReceipt = await publicClient.waitForTransactionReceipt({
-        hash: approveTx,
-        timeout: TX_RECEIPT_TIMEOUT,
-      });
-      if (approveReceipt.status === 'reverted') {
-        throw new Error(`Approval transaction reverted: ${approveTx}`);
+        });
+        const aaClient = (contractClient as any).sessionKeyClient;
+        await aaClient.sendTransaction({
+          to: REPPO_TOKEN,
+          data: approveData,
+        });
+        log.info('REPPO approved via AA');
+      } else {
+        // Direct EOA transaction
+        const approveTx = await withRetry(
+          () => walletClient.writeContract({
+            address: REPPO_TOKEN,
+            abi: ERC20_ABI,
+            functionName: 'approve',
+            args: [POD_CONTRACT, fee],
+            chain: base,
+            account,
+          }),
+          'approveREPPO',
+          { shouldRetry: isRetryableError },
+        );
+        log.info({ tx: approveTx }, 'Approve tx submitted');
+        const approveReceipt = await publicClient.waitForTransactionReceipt({
+          hash: approveTx,
+          timeout: TX_RECEIPT_TIMEOUT,
+        });
+        if (approveReceipt.status === 'reverted') {
+          throw new Error(`Approval transaction reverted: ${approveTx}`);
+        }
+        log.info('REPPO approved');
       }
-      log.info('REPPO approved');
     } else {
       log.info('Already approved');
     }
   }
 
-  log.info('Minting pod on Base...');
-  const mintTx = await withRetry(
-    () => walletClient.writeContract({
-      address: POD_CONTRACT,
+  log.info({ useAA }, 'Minting pod on Base...');
+
+  let mintTx: Hash;
+
+  if (useAA) {
+    // Use AA execution via sessionKeyClient (covered by Alchemy paymaster)
+    const mintData = encodeFunctionData({
       abi: POD_ABI,
       functionName: 'mintPod',
-      args: [account.address, EMISSION_SHARE],
-      chain: base,
-      account,
-    }),
-    'mintPod',
-    { shouldRetry: isRetryableError },
-  );
+      args: [aaWalletAddress, EMISSION_SHARE],
+    });
+    const aaClient = (contractClient as any).sessionKeyClient;
+    mintTx = await aaClient.sendTransaction({
+      to: POD_CONTRACT,
+      data: mintData,
+    }) as Hash;
+    log.info({ tx: mintTx }, 'Mint tx submitted via AA');
+  } else {
+    // Direct EOA transaction
+    mintTx = await withRetry(
+      () => walletClient.writeContract({
+        address: POD_CONTRACT,
+        abi: POD_ABI,
+        functionName: 'mintPod',
+        args: [account.address, EMISSION_SHARE],
+        chain: base,
+        account,
+      }),
+      'mintPod',
+      { shouldRetry: isRetryableError },
+    );
+    log.info({ tx: mintTx }, 'Mint tx submitted');
+  }
 
-  log.info({ tx: mintTx }, 'Mint tx submitted');
   const mintReceipt = await publicClient.waitForTransactionReceipt({
     hash: mintTx,
     timeout: TX_RECEIPT_TIMEOUT,

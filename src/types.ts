@@ -1,6 +1,7 @@
 import type { Hash, TransactionReceipt, PublicClient, Transport, Chain } from 'viem';
 import type { WalletClient } from 'viem';
 import type { PrivateKeyAccount } from 'viem/accounts';
+import type { AcpContractClientV2 } from '@virtuals-protocol/acp-node';
 
 export interface AgentSession {
   agentId: string;
@@ -36,6 +37,8 @@ export interface Clients {
   account: PrivateKeyAccount;
   publicClient: PublicClient<Transport, Chain>;
   walletClient: WalletClient<Transport, Chain, PrivateKeyAccount>;
+  contractClient?: InstanceType<typeof AcpContractClientV2>;
+  aaWalletAddress?: `0x${string}`;
 }
 
 export interface TweetData {
@@ -79,6 +82,11 @@ export interface AcpJob {
   id?: string | number;
   phase?: number;
   memos?: AcpJobMemo[];
+  // Pricing
+  price?: number;
+  priceValue?: number;
+  priceTokenAddress?: string;
+  netPayableAmount?: number;
   // Buyer/client identification - check actual SDK for correct field
   clientAddress?: string;
   buyerAddress?: string;

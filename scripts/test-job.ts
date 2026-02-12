@@ -87,6 +87,27 @@ while (Date.now() - start < TIMEOUT_MS) {
   const phase = job.phase;
   console.log(`[Test] Job #${jobId} phase: ${AcpJobPhases[phase] ?? phase}`);
 
+  // Buyer approves payment when agent has accepted (NEGOTIATION)
+  if (phase === AcpJobPhases.NEGOTIATION) {
+    try {
+      await job.payAndAcceptRequirement();
+      console.log('[Test] Payment approved, moving to TRANSACTION');
+    } catch (err) {
+      // May fail if agent hasn't posted terms yet, retry next poll
+      console.log(`[Test] payAndAcceptRequirement not ready yet: ${(err as Error).message}`);
+    }
+  }
+
+  // Buyer evaluates deliverable when in EVALUATION phase
+  if (phase === AcpJobPhases.EVALUATION) {
+    try {
+      await job.evaluate(true, 'Looks good');
+      console.log('[Test] Deliverable approved');
+    } catch (err) {
+      console.log(`[Test] evaluate failed: ${(err as Error).message}`);
+    }
+  }
+
   if (phase === AcpJobPhases.COMPLETED) {
     console.log('[Test] Job completed!');
     console.log('[Test] Deliverable:', job.deliverable);

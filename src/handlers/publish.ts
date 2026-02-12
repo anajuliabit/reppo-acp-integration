@@ -117,9 +117,8 @@ export async function handlePublishJob(
   // Acquire processing lock to prevent concurrent processing of same tweet
   const releaseLock = await acquireProcessingLock(tweetId);
   if (!releaseLock) {
-    log.warn({ jobId, tweetId }, 'Tweet currently being processed by another job');
-    await job.reject(`Tweet ${tweetId} is currently being processed`);
-    return;
+    log.warn({ jobId, tweetId }, 'Tweet currently being processed, skipping duplicate event');
+    return; // Don't reject — likely a duplicate socket event for the same job
   }
 
   // Double-check dedup after acquiring lock (another job might have just finished)
@@ -130,19 +129,28 @@ export async function handlePublishJob(
     return;
   }
 
-  // === Accept job and process immediately (simplified flow) ===
+  // === Phase-aware flow: accept first, process after buyer pays ===
   const phase = typeof job.phase === 'number' ? job.phase : -1;
 
-  // Accept job
-  try {
-    await job.accept('Processing X post for pod minting');
-    log.info({ jobId, tweetId, phase }, 'Job accepted');
-  } catch (err) {
+  // Phase 0-1: Accept the job and post requirement, then wait for buyer payment
+  if (phase <= 1) {
+    try {
+      if (phase === 0) {
+        await job.accept('Processing X post for pod minting');
+        log.info({ jobId, tweetId, phase }, 'Job accepted');
+      }
+      // Post requirement so buyer can payAndAcceptRequirement
+      await (job as any).createRequirement('Pod minting for X post. Pay to proceed.');
+      log.info({ jobId, tweetId, phase }, 'Requirement posted, waiting for buyer payment');
+    } catch (err) {
+      log.warn({ jobId, tweetId, error: (err as Error).message }, 'Accept/requirement failed');
+    }
     releaseLock();
-    throw err;
+    return;
   }
 
-  log.info({ jobId, tweetId, phase }, 'Processing...');
+  // Phase 2+ (TRANSACTION): Buyer has paid, do the work
+  log.info({ jobId, tweetId, phase }, 'Buyer paid, processing...');
 
   try {
 

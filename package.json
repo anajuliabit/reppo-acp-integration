@@ -15,6 +15,8 @@
   "author": "anajuliabit",
   "license": "MIT",
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.990.0",
+    "@aws-sdk/lib-dynamodb": "^3.990.0",
     "@virtuals-protocol/acp-node": "^0.3.0-beta.28",
     "dotenv": "^17.2.3",
     "pino": "^10.3.1",

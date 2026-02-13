@@ -7,4 +7,3 @@ dist/
 .reppo-buyer-sessions.json
 .reppo-dedup.json
 .env
-.reppo-pods.json

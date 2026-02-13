@@ -19,6 +19,8 @@ export interface Config {
   ACP_TESTNET: boolean;
   HEALTH_PORT: number;
   DATA_DIR: string;
+  DYNAMODB_ENDPOINT?: string;
+  AWS_REGION?: string;
 }
 
 const REQUIRED_VARS = [
@@ -82,6 +84,8 @@ export function loadConfig(): Config {
     ACP_TESTNET: process.env['ACP_TESTNET'] === 'true',
     HEALTH_PORT: parseInteger(process.env['HEALTH_PORT'], 'HEALTH_PORT', 3000),
     DATA_DIR: process.env['DATA_DIR'] || resolve(__dirname, '..'),
+    DYNAMODB_ENDPOINT: process.env['DYNAMODB_ENDPOINT'] || undefined,
+    AWS_REGION: process.env['AWS_REGION'] || 'us-east-1',
   };
 }
 

@@ -4,13 +4,14 @@
  * Usage:
  *   BUYER_PRIVATE_KEY=0x... \
  *   BUYER_ENTITY_ID=123 \
- *   BUYER_WALLET_ADDRESS=0x... \
+ *   BUYYER_WALLET_ADDRESS=0x... \
  *   PROVIDER_WALLET_ADDRESS=0x... \
- *   npx tsx scripts/test-job.ts <post-url> [subnet]
+ *   npx tsx scripts/test-job.ts <post-url> [subnet] [name] [description]
  *
- * Example:
+ * Examples:
  *   npx tsx scripts/test-job.ts https://x.com/VitalikButerin/status/1234567890
- *   npx tsx scripts/test-job.ts https://x.com/VitalikButerin/status/1234567890 ai
+ *   npx tsx scripts/test-job.ts https://x.com/VitalikButerin/status/1234567890 ai "My Pod" "A cool pod about crypto"
+ *   npx tsx scripts/test-job.ts https://x.com/VitalikButerin/status/1234567890 "" "Custom Description"
  *
  * Set ACP_TESTNET=true to use Base Sepolia instead of Base mainnet.
  */
@@ -35,7 +36,11 @@ if (missing.length > 0) {
 
 const postUrl = process.argv[2];
 if (!postUrl || !/(?:twitter\.com|x\.com)\/\w+\/status\/\d+/.test(postUrl)) {
-  console.error('Usage: npx tsx scripts/test-job.ts <x-post-url>');
+  console.error('Usage: npx tsx scripts/test-job.ts <x-post-url> [subnet] [name] [description]');
+  console.error('  post-url: X.com post URL (used for metadata)');
+  console.error('  subnet: optional subnet (default: crypto)');
+  console.error('  name: optional pod name (default: from post)');
+  console.error('  description: optional pod description (default: from post)');
   process.exit(1);
 }
 
@@ -44,7 +49,6 @@ const config = useTestnet ? baseSepoliaAcpConfigV2 : baseAcpConfigV2;
 
 console.log(`[Test] Network: ${useTestnet ? 'Base Sepolia (testnet)' : 'Base (mainnet)'}`);
 console.log(`[Test] Post URL: ${postUrl}`);
-console.log(`[Test] Provider: ${process.env['PROVIDER_WALLET_ADDRESS']}`);
 
 const pk = process.env['BUYER_PRIVATE_KEY']!;
 const contractClient = await AcpContractClientV2.build(
@@ -58,14 +62,27 @@ const acpClient = new AcpClient({ acpContractClient: contractClient });
 await acpClient.init();
 console.log('[Test] ACP client initialized');
 
-// Initiate job
-console.log('[Test] Sending job...');
+// Parse args
 const subnet = process.argv[3] || 'crypto';
-console.log(`[Test] Subnet: ${subnet}`);
+const podName = process.argv[4] || '';
+const podDescription = process.argv[5] || '';
 
+console.log(`[Test] Subnet: ${subnet}`);
+if (podName) console.log(`[Test] Pod Name: ${podName}`);
+if (podDescription) console.log(`[Test] Pod Description: ${podDescription}`);
+
+// Build job requirements with custom name/description
+const jobRequirements = {
+  postUrl,
+  subnet,
+  ...(podName && { podName }),
+  ...(podDescription && { podDescription }),
+};
+
+console.log('[Test] Sending job...');
 const jobId = await acpClient.initiateJob(
   process.env['PROVIDER_WALLET_ADDRESS']! as `0x${string}`,
-  { postUrl, subnet },
+  jobRequirements,
   new FareAmount(5, baseAcpConfigV2.baseFare),
 );
 console.log(`[Test] Job created: #${jobId}`);

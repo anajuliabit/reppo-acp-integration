@@ -30,6 +30,8 @@ function parseJobContent(job: AcpJob): ParsedJobContent {
       if (req?.subnet && !result.subnet) result.subnet = req.subnet;
       if (req?.agentName && !result.agentName) result.agentName = req.agentName;
       if (req?.agentDescription && !result.agentDescription) result.agentDescription = req.agentDescription;
+      if (req?.podName && !result.podName) result.podName = req.podName;
+      if (req?.podDescription && !result.podDescription) result.podDescription = req.podDescription;
       // Also check top-level in case it's not nested
       if (content?.postUrl && !result.postUrl) result.postUrl = content.postUrl;
       if (content?.subnet && !result.subnet) result.subnet = content.subnet;
@@ -169,7 +171,18 @@ export async function handlePublishJob(
 
     // Mint pod on-chain
     log.info({ jobId }, 'Minting pod...');
-    const mintResult = await mintPod(clients);
+    let mintResult;
+    try {
+      mintResult = await mintPod(clients);
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (msg.includes('Insufficient REPPO')) {
+        await job.reject(`Agent insufficient REPPO to mint pod: ${msg}`);
+        releaseLock();
+        return;
+      }
+      throw err;
+    }
     log.info({ 
       jobId, 
       txHash: mintResult.txHash, 
@@ -203,12 +216,14 @@ export async function handlePublishJob(
       }
     }
 
-    // Submit metadata to Reppo
-    const title = tweet.text.length > 100 ? tweet.text.slice(0, 97) + '...' : tweet.text;
+    // Submit metadata to Reppo (use custom name/description if provided, otherwise from tweet)
+    const title = content.podName || (tweet.text.length > 100 ? tweet.text.slice(0, 97) + '...' : tweet.text);
+    const description = content.podDescription || tweet.text;
+    
     await submitPodMetadata(publishSession, config, {
       txHash: mintResult.txHash,
       title,
-      description: tweet.text,
+      description,
       url: content.postUrl,
       imageUrl: tweet.mediaUrls[0],
       tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,

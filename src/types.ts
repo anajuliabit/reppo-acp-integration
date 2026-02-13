@@ -114,6 +114,8 @@ export interface ParsedJobContent {
   subnet?: string;
   agentName?: string;
   agentDescription?: string;
+  podName?: string;
+  podDescription?: string;
 }
 
 /**

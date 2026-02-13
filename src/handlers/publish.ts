@@ -253,9 +253,18 @@ export async function handlePublishJob(
     log.info({ jobId, basescanUrl }, 'Job delivered successfully');
 
   } catch (err) {
-    // Don't mark as processed on failure - allow retry
-    log.error({ jobId, tweetId, error: (err as Error).message }, 'Job processing failed');
-    // Don't throw - let job stay in active state for retry
+    const errorMsg = (err as Error).message ?? String(err);
+    log.error({ jobId, tweetId, error: errorMsg }, 'Job processing failed');
+
+    // Reject job if we can't fulfill it (insufficient funds, etc.)
+    if (errorMsg.includes('Insufficient REPPO')) {
+      try {
+        await job.reject?.('Insufficient REPPO to mint pod. Please try again later.');
+        log.info({ jobId }, 'Job rejected — insufficient REPPO');
+      } catch (rejectErr) {
+        log.error({ jobId, error: (rejectErr as Error).message }, 'Failed to reject job');
+      }
+    }
   } finally {
     releaseLock();
   }

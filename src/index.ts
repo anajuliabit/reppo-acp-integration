@@ -5,6 +5,7 @@ import { createClients, setAaClient } from './chain.js';
 import { initTwitterClient } from './twitter.js';
 import { initAcp } from './acp.js';
 import { initDedup, getProcessedCount } from './lib/dedup.js';
+import { initPodsFile } from './lib/pods.js';
 import { createLogger } from './lib/logger.js';
 
 const log = createLogger('main');
@@ -81,6 +82,7 @@ async function main() {
   // Initialize file paths and dedup state
   initReppoFiles(config.DATA_DIR);
   initDedup(config.DATA_DIR);
+  initPodsFile(config.DATA_DIR);
 
   // Start health server
   const healthServer = createHealthServer(config.HEALTH_PORT);

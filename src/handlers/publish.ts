@@ -3,6 +3,7 @@ import { mintPod } from '../chain.js';
 import { TWITTER_URL_REGEX } from '../constants.js';
 import { submitPodMetadata, getOrCreateBuyerAgent } from '../reppo.js';
 import { hasProcessed, markProcessed, acquireProcessingLock } from '../lib/dedup.js';
+import { savePod } from '../lib/pods.js';
 import { createLogger } from '../lib/logger.js';
 import type { Clients, AgentSession, AcpDeliverable, AcpJob, ParsedJobContent } from '../types.js';
 import type { Config } from '../config.js';
@@ -163,6 +164,9 @@ export async function handlePublishJob(
       textPreview: tweet.text.slice(0, 80),
     }, 'Tweet fetched');
 
+    // Get buyer info BEFORE minting (needed for tracking)
+    const buyerId = getBuyerId(job);
+
     // Mint pod on-chain
     log.info({ jobId }, 'Minting pod...');
     const mintResult = await mintPod(clients);
@@ -172,8 +176,18 @@ export async function handlePublishJob(
       podId: mintResult.podId?.toString(),
     }, 'Pod minted');
 
+    // Track pod for emissions distribution (wallet that requested the pod)
+    const buyerWallet = buyerId ?? clients.account.address;
+    if (mintResult.podId) {
+      savePod(
+        Number(mintResult.podId),
+        buyerWallet,
+        mintResult.txHash,
+      );
+      log.info({ podId: mintResult.podId, buyerWallet }, 'Pod tracked for emissions');
+    }
+
     // Get or create buyer's Reppo profile if agent info provided
-    const buyerId = getBuyerId(job);
     let publishSession = session; // default to reppodant
     
     if (buyerId && content.agentName) {
@@ -196,7 +210,7 @@ export async function handlePublishJob(
       title,
       description: tweet.text,
       url: content.postUrl,
-      imageURL: tweet.mediaUrls[0],
+      imageUrl: tweet.mediaUrls[0],
       tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
       category: 'social',
       subnet: content.subnet,

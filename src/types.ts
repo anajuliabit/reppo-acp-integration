@@ -6,11 +6,18 @@ import type { AcpContractClientV2 } from '@virtuals-protocol/acp-node';
 export interface AgentSession {
   agentId: string;
   accessToken: string;
+  walletAddress?: string;
 }
 
 export interface RegisterAgentResponse {
-  data: { id: string; accessToken: string };
+  data: { id: string; accessToken: string; walletAddress: string };
 }
+
+export interface SubnetConfig {
+  [key: string]: unknown;
+}
+
+export type SubnetsResponse = SubnetConfig[];
 
 export interface RegisterPodResponse {
   data: { id: string };
@@ -27,10 +34,10 @@ export interface SubmitMetadataParams {
   title: string;
   description?: string;
   url: string;
-  imageURL?: string;
+  imageUrl?: string;
   tokenId?: number;
   category?: string;
-  subnet: string;
+  subnet?: string;
 }
 
 export interface Clients {

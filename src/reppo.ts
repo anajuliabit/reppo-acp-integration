@@ -4,7 +4,7 @@ import lockfile from 'proper-lockfile';
 import { fetchJSON, withRetry, isRetryableError } from './lib/http.js';
 import { createLogger } from './lib/logger.js';
 import type { Config } from './config.js';
-import type { AgentSession, RegisterAgentResponse, RegisterPodResponse, SubmitMetadataParams } from './types.js';
+import type { AgentSession, RegisterAgentResponse, RegisterPodResponse, SubmitMetadataParams, SubnetsResponse } from './types.js';
 
 const log = createLogger('reppo');
 let SESSION_FILE = '';
@@ -99,10 +99,27 @@ export async function registerAgent(
   const session: AgentSession = {
     agentId: res.data.id,
     accessToken: res.data.accessToken,
+    walletAddress: res.data.walletAddress,
   };
   saveSession(session);
-  log.info({ agentId: session.agentId }, 'Registered successfully');
+  log.info({ agentId: session.agentId, walletAddress: session.walletAddress }, 'Registered successfully');
   return session;
+}
+
+/**
+ * Fetch available subnet configurations from Reppo.
+ */
+export async function getSubnets(config: Config): Promise<SubnetsResponse> {
+  log.info('Fetching subnet configs from Reppo...');
+  const data = await withRetry(
+    () => fetchJSON<SubnetsResponse>(`${config.REPPO_API_URL}/agents/subnets`, {
+      method: 'GET',
+    }),
+    'getSubnets',
+    { shouldRetry: isRetryableError },
+  );
+  log.info({ count: Array.isArray(data) ? data.length : 0 }, 'Subnets fetched');
+  return data;
 }
 
 /**
@@ -147,6 +164,7 @@ export async function getOrCreateBuyerAgent(
   const session: AgentSession = {
     agentId: res.data.id,
     accessToken: res.data.accessToken,
+    walletAddress: res.data.walletAddress,
   };
   await saveBuyerSession(buyerId, session);
   log.info({ buyerId, agentId: session.agentId }, 'Buyer registered successfully');
@@ -170,11 +188,10 @@ export async function submitPodMetadata(
           description: params.description || params.title,
           url: params.url,
           platform: 'x',
-          subnet: params.subnet,
           podMintTx: params.txHash,
           ...(params.tokenId !== undefined && { tokenId: Number(params.tokenId) }),
           ...(params.category && { category: params.category }),
-          ...(params.imageURL && { imageURL: params.imageURL }),
+          ...(params.imageUrl && { imageUrl: params.imageUrl }),
         }),
       },
     ),

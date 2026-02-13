@@ -189,6 +189,9 @@ export async function handlePublishJob(
       podId: mintResult.podId?.toString(),
     }, 'Pod minted');
 
+    // Mark as processed IMMEDIATELY after mint to prevent duplicate mints on retry
+    await markProcessed(tweetId);
+
     // Track pod for emissions distribution (wallet that requested the pod)
     const buyerWallet = buyerId ?? clients.account.address;
     if (mintResult.podId) {
@@ -236,9 +239,6 @@ export async function handlePublishJob(
     } catch (metaErr) {
       log.warn({ jobId, error: metaErr instanceof Error ? metaErr.message : metaErr }, 'Metadata submission failed - pod still minted');
     }
-
-    // Mark as processed
-    await markProcessed(tweetId);
 
     // Deliver result via ACP
     const basescanUrl = `https://basescan.org/tx/${mintResult.txHash}`;

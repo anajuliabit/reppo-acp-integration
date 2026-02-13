@@ -220,24 +220,27 @@ export async function handlePublishJob(
     const title = content.podName || (tweet.text.length > 100 ? tweet.text.slice(0, 97) + '...' : tweet.text);
     const description = content.podDescription || tweet.text;
     
-    // Submit metadata to Reppo (skip for now - causing crashes)
-    // try {
-    //   await submitPodMetadata(publishSession, config, {
-    //     txHash: mintResult.txHash,
-    //     title,
-    //     description,
-    //     url: content.postUrl,
-    //     imageUrl: tweet.mediaUrls[0],
-    //     tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
-    //     category: 'social',
-    //     subnet: content.subnet,
-    //   });
-    // } catch (metaErr) {
-    //   log.warn({ jobId, error: metaErr instanceof Error ? metaErr.message : metaErr }, 'Metadata submission failed - pod still minted');
-    // }
-    log.info({ jobId, podId: mintResult.podId }, 'Pod minted, skipping metadata submission');
+    // Submit metadata to Reppo (non-fatal if it fails)
+    try {
+      await submitPodMetadata(publishSession, config, {
+        txHash: mintResult.txHash,
+        title,
+        description,
+        url: content.postUrl,
+        imageUrl: tweet.mediaUrls[0],
+        tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
+        category: 'social',
+        subnet: content.subnet,
+      });
+      log.info({ jobId }, 'Metadata submitted to Reppo');
+    } catch (metaErr) {
+      log.warn({ jobId, error: metaErr instanceof Error ? metaErr.message : metaErr }, 'Metadata submission failed - pod still minted');
+    }
 
-    // Deliver result (fire and forget - don't crash if it fails)
+    // Mark as processed
+    await markProcessed(tweetId);
+
+    // Deliver result via ACP
     const basescanUrl = `https://basescan.org/tx/${mintResult.txHash}`;
     const deliverable: AcpDeliverable = {
       postUrl: content.postUrl,
@@ -246,17 +249,8 @@ export async function handlePublishJob(
       podId: mintResult.podId?.toString(),
       basescanUrl,
     };
-    
-    // Don't await - just deliver and mark processed
-    job.deliver(deliverable).catch(err => 
-      log.error({ jobId, error: err instanceof Error ? err.message : err }, 'Deliver failed')
-    );
-    markProcessed(tweetId).catch(err =>
-      log.error({ jobId, error: err instanceof Error ? err.message : err }, 'Mark processed failed')
-    );
-    
+    await job.deliver(deliverable);
     log.info({ jobId, basescanUrl }, 'Job delivered successfully');
-    return;
 
   } catch (err) {
     // Don't mark as processed on failure - allow retry

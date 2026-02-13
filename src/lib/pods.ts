@@ -13,10 +13,19 @@ export function initPods(config: { DYNAMODB_ENDPOINT?: string; AWS_REGION?: stri
   const endpoint = config.DYNAMODB_ENDPOINT;
   const region = config.AWS_REGION || 'us-east-1';
   
+  // Build credentials from env (supports temporary ASIA keys with session token)
+  const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const sessionToken = process.env.AWS_SESSION_TOKEN;
+  
   client = new DynamoDBClient({
     endpoint,
     region,
-    ...(endpoint ? { tls: false, credentials: { accessKeyId: 'local', secretAccessKey: 'local' } } : {}),
+    ...(endpoint
+      ? { tls: false, credentials: { accessKeyId: 'local', secretAccessKey: 'local' } }
+      : accessKeyId && secretAccessKey
+        ? { credentials: { accessKeyId, secretAccessKey, ...(sessionToken ? { sessionToken } : {}) } }
+        : {}),
   });
   
   docClient = DynamoDBDocumentClient.from(client);

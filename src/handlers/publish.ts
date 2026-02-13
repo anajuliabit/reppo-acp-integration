@@ -3,7 +3,7 @@ import { mintPod } from '../chain.js';
 import { TWITTER_URL_REGEX } from '../constants.js';
 import { submitPodMetadata, getOrCreateBuyerAgent } from '../reppo.js';
 import { hasProcessed, markProcessed, acquireProcessingLock, hasJobMinted, markJobMinted } from '../lib/dedup.js';
-import { savePod } from '../lib/pods.js';
+import { savePod, getJobMint } from '../lib/pods.js';
 import { createLogger } from '../lib/logger.js';
 import type { Clients, AgentSession, AcpDeliverable, AcpJob, ParsedJobContent } from '../types.js';
 import type { Config } from '../config.js';
@@ -169,9 +169,16 @@ export async function handlePublishJob(
     // Get buyer info BEFORE minting (needed for tracking)
     const buyerId = getBuyerId(job);
 
-    // Check if this job was already minted (prevents duplicate mints across restarts)
+    // Check if this job was already minted (DynamoDB + in-memory)
     if (hasJobMinted(jobId)) {
-      log.warn({ jobId }, 'Job already minted, skipping');
+      log.warn({ jobId }, 'Job already minted (memory), skipping');
+      releaseLock();
+      return;
+    }
+    const existingMint = await getJobMint(Number(jobId));
+    if (existingMint) {
+      log.warn({ jobId, podId: existingMint.podId, txHash: existingMint.mintTxHash }, 'Job already minted (DynamoDB), skipping');
+      await markJobMinted(jobId);
       releaseLock();
       return;
     }
@@ -207,8 +214,10 @@ export async function handlePublishJob(
         Number(mintResult.podId),
         buyerWallet,
         mintResult.txHash,
+        undefined,
+        Number(jobId),
       );
-      log.info({ podId: mintResult.podId, buyerWallet }, 'Pod tracked for emissions');
+      log.info({ podId: mintResult.podId, buyerWallet, jobId }, 'Pod tracked for emissions');
     }
 
     // Get or create buyer's Reppo profile if agent info provided

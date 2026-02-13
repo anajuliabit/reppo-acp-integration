@@ -28,6 +28,7 @@ export interface PodRecord {
   buyerWallet: string;
   buyerAgentId?: string;
   mintTxHash: string;
+  jobId?: number;
   createdAt: string;
   claimedAt?: string;
   claimedAmount?: number;
@@ -45,6 +46,7 @@ export async function savePod(
   buyerWallet: string,
   mintTxHash: string,
   buyerAgentId?: string,
+  jobId?: number,
 ): Promise<void> {
   const dc = await getDocClient();
   await dc.send(new PutCommand({
@@ -54,11 +56,26 @@ export async function savePod(
       buyerWallet,
       buyerAgentId,
       mintTxHash,
+      jobId,
       createdAt: new Date().toISOString(),
       claimed: false,
     },
   }));
-  log.info({ podId, buyerWallet }, 'Pod saved to DynamoDB');
+  log.info({ podId, buyerWallet, jobId }, 'Pod saved to DynamoDB');
+}
+
+/**
+ * Check if a job was already minted by scanning for its jobId in DynamoDB
+ */
+export async function getJobMint(jobId: number): Promise<PodRecord | null> {
+  const dc = await getDocClient();
+  const result = await dc.send(new ScanCommand({
+    TableName: TABLE_NAME,
+    FilterExpression: 'jobId = :jid',
+    ExpressionAttributeValues: { ':jid': jobId },
+    Limit: 1,
+  }));
+  return (result.Items?.[0] as PodRecord | undefined) ?? null;
 }
 
 export async function getPod(podId: number): Promise<PodRecord | null> {

@@ -6,6 +6,7 @@ import { initTwitterClient } from './twitter.js';
 import { initAcp } from './acp.js';
 import { initDedup, getProcessedCount } from './lib/dedup.js';
 import { initPods } from './lib/pods.js';
+import { handlePublishJob } from './handlers/publish.js';
 import { createLogger } from './lib/logger.js';
 
 const log = createLogger('main');
@@ -125,6 +126,15 @@ async function main() {
         if (jobs && Array.isArray(jobs) && jobs.length > 0) {
           log.info({ count: jobs.length }, 'Active jobs');
           serviceState.activeJobs = jobs.length;
+          
+          // Process each job
+          for (const job of jobs) {
+            try {
+              await handlePublishJob(job, clients, session, config);
+            } catch (err) {
+              log.error({ jobId: job.id, error: err instanceof Error ? err.message : err }, 'Job processing error');
+            }
+          }
         }
       } catch (err) {
         log.error({ error: err instanceof Error ? err.message : err }, 'Poll error');

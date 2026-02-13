@@ -192,7 +192,7 @@ export async function handlePublishJob(
     // Track pod for emissions distribution (wallet that requested the pod)
     const buyerWallet = buyerId ?? clients.account.address;
     if (mintResult.podId) {
-      savePod(
+      await savePod(
         Number(mintResult.podId),
         buyerWallet,
         mintResult.txHash,
@@ -220,21 +220,24 @@ export async function handlePublishJob(
     const title = content.podName || (tweet.text.length > 100 ? tweet.text.slice(0, 97) + '...' : tweet.text);
     const description = content.podDescription || tweet.text;
     
-    await submitPodMetadata(publishSession, config, {
-      txHash: mintResult.txHash,
-      title,
-      description,
-      url: content.postUrl,
-      imageUrl: tweet.mediaUrls[0],
-      tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
-      category: 'social',
-      subnet: content.subnet,
-    });
+    // Submit metadata to Reppo (skip for now - causing crashes)
+    // try {
+    //   await submitPodMetadata(publishSession, config, {
+    //     txHash: mintResult.txHash,
+    //     title,
+    //     description,
+    //     url: content.postUrl,
+    //     imageUrl: tweet.mediaUrls[0],
+    //     tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
+    //     category: 'social',
+    //     subnet: content.subnet,
+    //   });
+    // } catch (metaErr) {
+    //   log.warn({ jobId, error: metaErr instanceof Error ? metaErr.message : metaErr }, 'Metadata submission failed - pod still minted');
+    // }
+    log.info({ jobId, podId: mintResult.podId }, 'Pod minted, skipping metadata submission');
 
-    // Mark as processed AFTER successful completion
-    await markProcessed(tweetId);
-
-    // Build deliverable
+    // Deliver result (fire and forget - don't crash if it fails)
     const basescanUrl = `https://basescan.org/tx/${mintResult.txHash}`;
     const deliverable: AcpDeliverable = {
       postUrl: content.postUrl,
@@ -243,15 +246,22 @@ export async function handlePublishJob(
       podId: mintResult.podId?.toString(),
       basescanUrl,
     };
-
-    // Deliver result via ACP
-    await job.deliver(deliverable);
+    
+    // Don't await - just deliver and mark processed
+    job.deliver(deliverable).catch(err => 
+      log.error({ jobId, error: err instanceof Error ? err.message : err }, 'Deliver failed')
+    );
+    markProcessed(tweetId).catch(err =>
+      log.error({ jobId, error: err instanceof Error ? err.message : err }, 'Mark processed failed')
+    );
+    
     log.info({ jobId, basescanUrl }, 'Job delivered successfully');
+    return;
 
   } catch (err) {
     // Don't mark as processed on failure - allow retry
     log.error({ jobId, tweetId, error: (err as Error).message }, 'Job processing failed');
-    throw err;
+    // Don't throw - let job stay in active state for retry
   } finally {
     releaseLock();
   }

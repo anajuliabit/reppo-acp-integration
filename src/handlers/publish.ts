@@ -2,7 +2,7 @@ import { extractTweetId, fetchTweet } from '../twitter.js';
 import { mintPod } from '../chain.js';
 import { TWITTER_URL_REGEX } from '../constants.js';
 import { submitPodMetadata, getOrCreateBuyerAgent } from '../reppo.js';
-import { hasProcessed, markProcessed, acquireProcessingLock } from '../lib/dedup.js';
+import { hasProcessed, markProcessed, acquireProcessingLock, hasJobMinted, markJobMinted } from '../lib/dedup.js';
 import { savePod } from '../lib/pods.js';
 import { createLogger } from '../lib/logger.js';
 import type { Clients, AgentSession, AcpDeliverable, AcpJob, ParsedJobContent } from '../types.js';
@@ -169,6 +169,13 @@ export async function handlePublishJob(
     // Get buyer info BEFORE minting (needed for tracking)
     const buyerId = getBuyerId(job);
 
+    // Check if this job was already minted (prevents duplicate mints across restarts)
+    if (hasJobMinted(jobId)) {
+      log.warn({ jobId }, 'Job already minted, skipping');
+      releaseLock();
+      return;
+    }
+
     // Mint pod on-chain
     log.info({ jobId }, 'Minting pod...');
     let mintResult;
@@ -189,7 +196,8 @@ export async function handlePublishJob(
       podId: mintResult.podId?.toString(),
     }, 'Pod minted');
 
-    // Mark as processed IMMEDIATELY after mint to prevent duplicate mints on retry
+    // Mark job as minted IMMEDIATELY to prevent duplicate mints
+    await markJobMinted(jobId);
     await markProcessed(tweetId);
 
     // Track pod for emissions distribution (wallet that requested the pod)

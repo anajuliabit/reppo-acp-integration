@@ -7,3 +7,4 @@ dist/
 .reppo-buyer-sessions.json
 .reppo-dedup.json
 .env
+.env.swp

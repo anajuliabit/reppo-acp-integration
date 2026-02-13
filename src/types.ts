@@ -123,5 +123,6 @@ export interface ParsedJobContent {
  */
 export interface DedupState {
   processedTweets: string[];
+  mintedJobs?: string[];
   lastUpdated: string;
 }

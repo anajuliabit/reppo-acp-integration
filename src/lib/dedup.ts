@@ -14,6 +14,9 @@ let cache: Set<string> | null = null;
 // Job processing locks (prevent concurrent processing of same tweet)
 const processingLocks = new Map<string, Promise<void>>();
 
+// Jobs that have been minted (prevent double-minting across restarts)
+const mintedJobs = new Set<string>();
+
 function loadState(): DedupState {
   if (!existsSync(DEDUP_FILE)) {
     return { processedTweets: [], lastUpdated: new Date().toISOString() };
@@ -39,7 +42,11 @@ export function initDedup(dataDir?: string): void {
   }
   const state = loadState();
   cache = new Set(state.processedTweets);
-  log.info({ count: cache.size }, 'Loaded dedup state');
+  // Load minted jobs from disk
+  if (state.mintedJobs) {
+    for (const id of state.mintedJobs) mintedJobs.add(id);
+  }
+  log.info({ tweets: cache.size, jobs: mintedJobs.size }, 'Loaded dedup state');
 }
 
 /**
@@ -113,6 +120,41 @@ export async function acquireProcessingLock(tweetId: string): Promise<(() => voi
     processingLocks.delete(tweetId);
     releaseFn();
   };
+}
+
+/**
+ * Check if a job has already been minted
+ */
+export function hasJobMinted(jobId: string | number): boolean {
+  return mintedJobs.has(String(jobId));
+}
+
+/**
+ * Mark a job as minted (in-memory + persisted in dedup file)
+ */
+export async function markJobMinted(jobId: string | number): Promise<void> {
+  const id = String(jobId);
+  mintedJobs.add(id);
+  
+  // Also persist to disk
+  let release: (() => Promise<void>) | undefined;
+  try {
+    if (!existsSync(DEDUP_FILE)) {
+      saveState({ processedTweets: [], lastUpdated: new Date().toISOString() });
+    }
+    release = await lockfile.lock(DEDUP_FILE, { retries: 3 });
+    const state = loadState();
+    if (!state.mintedJobs) state.mintedJobs = [];
+    if (!state.mintedJobs.includes(id)) {
+      state.mintedJobs.push(id);
+      state.lastUpdated = new Date().toISOString();
+      saveState(state);
+    }
+  } catch (err) {
+    log.error({ err, jobId: id }, 'Failed to persist minted job');
+  } finally {
+    if (release) await release();
+  }
 }
 
 /**

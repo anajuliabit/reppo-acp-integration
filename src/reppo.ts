@@ -176,7 +176,27 @@ export async function submitPodMetadata(
   config: Config,
   params: SubmitMetadataParams,
 ): Promise<RegisterPodResponse> {
-  log.info({ agentId: session.agentId, subnet: params.subnet }, 'Submitting metadata to Reppo...');
+  // Resolve subnet name to ID
+  let subnetId: string | undefined;
+  if (params.subnet) {
+    try {
+      const subnets = await getSubnets(config) as any;
+      const list = subnets?.data?.privateSubnets ?? subnets ?? [];
+      const match = list.find(
+        (s: any) => s.subnet === params.subnet || s.id === params.subnet
+      );
+      subnetId = match?.id;
+      if (!subnetId) {
+        const fallback = list.find((s: any) => s.subnet === 'AI_AGENTS');
+        subnetId = fallback?.id;
+        log.warn({ requested: params.subnet, fallback: 'AI_AGENTS', subnetId }, 'Subnet not found, using fallback');
+      }
+    } catch (err) {
+      log.warn({ error: (err as Error).message }, 'Failed to resolve subnet, skipping subnetId');
+    }
+  }
+
+  log.info({ agentId: session.agentId, subnet: params.subnet, subnetId }, 'Submitting metadata to Reppo...');
   const data = await withRetry(
     () => fetchJSON<RegisterPodResponse>(
       `${config.REPPO_API_URL}/agents/${session.agentId}/pods`,
@@ -192,7 +212,7 @@ export async function submitPodMetadata(
           ...(params.tokenId !== undefined && { tokenId: Number(params.tokenId) }),
           ...(params.category && { category: params.category }),
           ...(params.imageUrl && { imageUrl: params.imageUrl }),
-          ...(params.subnet && { subnetId: params.subnet }),
+          ...(subnetId && { subnetId }),
         }),
       },
     ),

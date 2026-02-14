@@ -144,23 +144,24 @@ export async function handlePublishJob(
   // Phase 0-1: Accept the job and post requirement, then wait for buyer payment
   if (phase <= 1) {
     try {
-      if (phase === 0) {
-        // Fetch available subnets to include in acceptance message
-        let subnetInfo = '';
-        try {
-          const subnets = await getSubnets(config);
-          const subnetList = (subnets as any)?.data ?? subnets;
-          if (Array.isArray(subnetList) && subnetList.length > 0) {
-            subnetInfo = ` Available subnets: ${subnetList.map((s: any) => `${s.name || s.id} (id: ${s.id})`).join(', ')}.`;
-          }
-        } catch {
-          // Non-fatal — proceed without subnet info
+      // Fetch available subnets to include in messages
+      let subnetInfo = '';
+      try {
+        const subnets = await getSubnets(config);
+        const subnetList = (subnets as any)?.data ?? subnets;
+        if (Array.isArray(subnetList) && subnetList.length > 0) {
+          subnetInfo = ` Available subnets: ${subnetList.map((s: any) => `${s.name || s.id} (id: ${s.id})`).join(', ')}.`;
         }
+      } catch {
+        // Non-fatal — proceed without subnet info
+      }
+
+      if (phase === 0) {
         await job.accept(`Processing X post for pod minting.${subnetInfo} Please include subnetId in your job payload.`);
         log.info({ jobId, tweetId, phase }, 'Job accepted');
       }
       // Post requirement so buyer can payAndAcceptRequirement
-      await (job as any).createRequirement('Pod minting for X post. Pay to proceed. Include subnetId in payload.');
+      await (job as any).createRequirement(`Pod minting for X post. Pay to proceed.${subnetInfo} Include subnetId in payload.`);
       log.info({ jobId, tweetId, phase }, 'Requirement posted, waiting for buyer payment');
     } catch (err) {
       log.warn({ jobId, tweetId, error: (err as Error).message }, 'Accept/requirement failed');

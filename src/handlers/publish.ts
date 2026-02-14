@@ -106,6 +106,20 @@ export async function handlePublishJob(
     return;
   }
 
+  // Validate subnet against available subnets
+  try {
+    const subnets = await getSubnets(config);
+    const subnetList: any[] = (subnets as any)?.data ?? (Array.isArray(subnets) ? subnets : []);
+    const validIds = subnetList.map((s: any) => String(s.id));
+    if (validIds.length > 0 && !validIds.includes(String(content.subnet))) {
+      log.warn({ jobId, subnet: content.subnet, validIds }, 'Invalid subnet');
+      await job.reject(`Invalid subnetId "${content.subnet}". Available: ${subnetList.map((s: any) => `${s.name || s.id} (id: ${s.id})`).join(', ')}`);
+      return;
+    }
+  } catch (err) {
+    log.warn({ jobId, error: (err as Error).message }, 'Failed to validate subnet, proceeding anyway');
+  }
+
   // Validate URL format
   if (!TWITTER_URL_REGEX.test(content.postUrl)) {
     log.warn({ jobId, url: content.postUrl }, 'Invalid URL format');

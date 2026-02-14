@@ -1,7 +1,7 @@
 import { extractTweetId, fetchTweet } from '../twitter.js';
 import { mintPod } from '../chain.js';
 import { TWITTER_URL_REGEX } from '../constants.js';
-import { submitPodMetadata, getOrCreateBuyerAgent } from '../reppo.js';
+import { submitPodMetadata, getOrCreateBuyerAgent, getSubnets } from '../reppo.js';
 import { hasProcessed, markProcessed, acquireProcessingLock, hasJobMinted, markJobMinted } from '../lib/dedup.js';
 import { savePod, getJobMint } from '../lib/pods.js';
 import { createLogger } from '../lib/logger.js';
@@ -71,6 +71,14 @@ export async function handlePublishJob(
   config: Config,
 ): Promise<void> {
   const jobId = job.id ?? 'unknown';
+  
+  // Skip already-minted jobs (survives restarts via dedup file)
+  log.info({ jobId, jobIdType: typeof jobId, minted: hasJobMinted(jobId) }, 'Dedup check');
+  if (hasJobMinted(jobId)) {
+    log.info({ jobId }, 'Job already minted, skipping');
+    return;
+  }
+
   log.info({ jobId }, 'Processing job');
 
   // Parse job content
@@ -139,11 +147,22 @@ export async function handlePublishJob(
   if (phase <= 1) {
     try {
       if (phase === 0) {
-        await job.accept('Processing X post for pod minting');
+        // Fetch available subnets to include in acceptance message
+        let subnetInfo = '';
+        try {
+          const subnets = await getSubnets(config);
+          const subnetList = (subnets as any)?.data ?? subnets;
+          if (Array.isArray(subnetList) && subnetList.length > 0) {
+            subnetInfo = ` Available subnets: ${subnetList.map((s: any) => `${s.name || s.id} (id: ${s.id})`).join(', ')}.`;
+          }
+        } catch {
+          // Non-fatal — proceed without subnet info
+        }
+        await job.accept(`Processing X post for pod minting.${subnetInfo} Please include subnetId in your job payload.`);
         log.info({ jobId, tweetId, phase }, 'Job accepted');
       }
       // Post requirement so buyer can payAndAcceptRequirement
-      await (job as any).createRequirement('Pod minting for X post. Pay to proceed.');
+      await (job as any).createRequirement('Pod minting for X post. Pay to proceed. Include subnetId in payload.');
       log.info({ jobId, tweetId, phase }, 'Requirement posted, waiting for buyer payment');
     } catch (err) {
       log.warn({ jobId, tweetId, error: (err as Error).message }, 'Accept/requirement failed');

@@ -250,7 +250,7 @@ export async function handlePublishJob(
         imageUrl: tweet.mediaUrls[0],
         tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
         category: 'social',
-        subnet: content.subnet,
+        subnetId: content.subnet,
       });
       log.info({ jobId }, 'Metadata submitted to Reppo');
     } catch (metaErr) {

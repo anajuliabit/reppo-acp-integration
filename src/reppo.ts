@@ -192,6 +192,7 @@ export async function submitPodMetadata(
           ...(params.tokenId !== undefined && { tokenId: Number(params.tokenId) }),
           ...(params.category && { category: params.category }),
           ...(params.imageUrl && { imageUrl: params.imageUrl }),
+          ...(params.subnetId && { subnetId: params.subnetId }),
         }),
       },
     ),

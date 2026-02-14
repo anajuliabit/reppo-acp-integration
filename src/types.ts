@@ -37,7 +37,7 @@ export interface SubmitMetadataParams {
   imageUrl?: string;
   tokenId?: number;
   category?: string;
-  subnet?: string;
+  subnetId?: string;
 }
 
 export interface Clients {

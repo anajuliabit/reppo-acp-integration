@@ -72,11 +72,9 @@ export async function handlePublishJob(
 ): Promise<void> {
   const jobId = job.id ?? 'unknown';
   
-  // Skip already-minted jobs (survives restarts via dedup file)
-  log.info({ jobId, jobIdType: typeof jobId, minted: hasJobMinted(jobId) }, 'Dedup check');
+  // Skip already-processed jobs (minted or manually skipped)
   if (hasJobMinted(jobId)) {
-    log.info({ jobId }, 'Job already minted, skipping');
-    return;
+    return; // Silent skip — already handled
   }
 
   log.info({ jobId }, 'Processing job');

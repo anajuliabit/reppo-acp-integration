@@ -109,11 +109,14 @@ export async function handlePublishJob(
   // Validate subnet against available subnets
   try {
     const subnets = await getSubnets(config);
-    const subnetList: any[] = (subnets as any)?.data ?? (Array.isArray(subnets) ? subnets : []);
+    const raw = (subnets as any)?.data;
+    const subnetList: any[] = raw?.privateSubnets ?? raw?.subnets ?? (Array.isArray(raw) ? raw : []);
     const validIds = subnetList.map((s: any) => String(s.id));
-    if (validIds.length > 0 && !validIds.includes(String(content.subnet))) {
+    const validNames = subnetList.map((s: any) => String(s.subnet ?? s.name ?? '').toLowerCase());
+    const needle = String(content.subnet).toLowerCase();
+    if (subnetList.length > 0 && !validIds.includes(content.subnet) && !validNames.includes(needle)) {
       log.warn({ jobId, subnet: content.subnet, validIds }, 'Invalid subnet');
-      await job.reject(`Invalid subnetId "${content.subnet}". Available: ${subnetList.map((s: any) => `${s.name || s.id} (id: ${s.id})`).join(', ')}`);
+      await job.reject(`Invalid subnetId "${content.subnet}". Available: ${subnetList.map((s: any) => `${s.subnet || s.name} (id: ${s.id})`).join(', ')}`);
       return;
     }
   } catch (err) {
@@ -162,9 +165,10 @@ export async function handlePublishJob(
       let subnetInfo = '';
       try {
         const subnets = await getSubnets(config);
-        const subnetList = (subnets as any)?.data ?? subnets;
+        const rawData = (subnets as any)?.data;
+        const subnetList = rawData?.privateSubnets ?? rawData?.subnets ?? (Array.isArray(rawData) ? rawData : []);
         if (Array.isArray(subnetList) && subnetList.length > 0) {
-          subnetInfo = ` Available subnets: ${subnetList.map((s: any) => `${s.name || s.id} (id: ${s.id})`).join(', ')}.`;
+          subnetInfo = ` Available subnets: ${subnetList.map((s: any) => `${s.subnet || s.name} (id: ${s.id})`).join(', ')}.`;
         }
       } catch {
         // Non-fatal — proceed without subnet info

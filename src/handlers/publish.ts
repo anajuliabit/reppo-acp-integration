@@ -97,7 +97,7 @@ export async function handlePublishJob(
     return;
   }
 
-  // Validate subnet against available subnets
+  // Validate subnet against available subnets and resolve name to ID
   try {
     const subnets = await getSubnets(config);
     const raw = (subnets as any)?.data;
@@ -109,6 +109,14 @@ export async function handlePublishJob(
       log.warn({ jobId, subnet: content.subnet, validIds }, 'Invalid subnet');
       await job.reject(`Invalid subnetId "${content.subnet}". Available: ${subnetList.map((s: any) => `${s.subnet || s.name} (id: ${s.id})`).join(', ')}`);
       return;
+    }
+    // If buyer sent a name instead of an ID, resolve it to the actual ID
+    if (subnetList.length > 0 && !validIds.includes(content.subnet)) {
+      const match = subnetList.find((s: any) => String(s.subnet ?? s.name ?? '').toLowerCase() === needle);
+      if (match) {
+        log.info({ jobId, from: content.subnet, to: match.id }, 'Resolved subnet name to ID');
+        content.subnet = String(match.id);
+      }
     }
   } catch (err) {
     log.warn({ jobId, error: (err as Error).message }, 'Failed to validate subnet, proceeding anyway');

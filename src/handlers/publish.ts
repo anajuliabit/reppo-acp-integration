@@ -83,15 +83,6 @@ export async function handlePublishJob(
   const content = parseJobContent(job);
   
   // === Validation BEFORE accepting ===
-
-  // Validate fare amount (minimum 1 USDC to cover minting costs)
-  const MIN_FARE_USDC = 5; // 5 USDC minimum
-  if (!job.price || job.price < MIN_FARE_USDC) {
-    log.warn({ jobId, price: job.price }, 'Fare too low');
-    await job.reject(`Fare too low. Minimum: ${MIN_FARE_USDC} USDC. Got: ${job.price ?? 0}`);
-    return;
-  }
-  log.info({ jobId, price: job.price }, 'Fare validated');
   
   // Validate required fields
   if (!content.postUrl) {

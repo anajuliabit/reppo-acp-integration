@@ -103,8 +103,9 @@ export async function handlePublishJob(
     const raw = (subnets as any)?.data;
     const subnetList: any[] = raw?.privateSubnets ?? raw?.subnets ?? (Array.isArray(raw) ? raw : []);
     const validIds = subnetList.map((s: any) => String(s.id));
-    const validNames = subnetList.map((s: any) => String(s.subnet ?? s.name ?? '').toLowerCase());
-    const needle = String(content.subnet).toLowerCase();
+    const normalize = (s: string) => s.toLowerCase().replace(/[\s_-]+/g, '_');
+    const validNames = subnetList.map((s: any) => normalize(String(s.subnet ?? s.name ?? '')));
+    const needle = normalize(String(content.subnet));
     if (subnetList.length > 0 && !validIds.includes(content.subnet) && !validNames.includes(needle)) {
       log.warn({ jobId, subnet: content.subnet, validIds }, 'Invalid subnet');
       await job.reject(`Invalid subnetId "${content.subnet}". Available: ${subnetList.map((s: any) => `${s.subnet || s.name} (id: ${s.id})`).join(', ')}`);
@@ -112,7 +113,7 @@ export async function handlePublishJob(
     }
     // If buyer sent a name instead of an ID, resolve it to the actual ID
     if (subnetList.length > 0 && !validIds.includes(content.subnet)) {
-      const match = subnetList.find((s: any) => String(s.subnet ?? s.name ?? '').toLowerCase() === needle);
+      const match = subnetList.find((s: any) => normalize(String(s.subnet ?? s.name ?? '')) === needle);
       if (match) {
         log.info({ jobId, from: content.subnet, to: match.id }, 'Resolved subnet name to ID');
         content.subnet = String(match.id);
@@ -174,11 +175,11 @@ export async function handlePublishJob(
       }
 
       if (phase === 0) {
-        await job.accept(`Processing X post for pod minting.${subnetInfo} Please include subnetId in your job payload.`);
+        await job.accept(`Processing X post for pod minting. Please include a "subnet" field (name or ID) in your job payload. You can ask the Reppo agent for a list of available subnets.${subnetInfo}`);
         log.info({ jobId, tweetId, phase }, 'Job accepted');
       }
       // Post requirement so buyer can payAndAcceptRequirement
-      await (job as any).createRequirement(`Pod minting for X post. Pay to proceed.${subnetInfo} Include subnetId in payload.`);
+      await (job as any).createRequirement(`Pod minting for X post. Pay to proceed. Required fields: "postUrl" (X/Twitter URL) and "subnet" (subnet name or ID). You can ask the Reppo agent for the list of available subnets.${subnetInfo}`);
       log.info({ jobId, tweetId, phase }, 'Requirement posted, waiting for buyer payment');
     } catch (err) {
       log.warn({ jobId, tweetId, error: (err as Error).message }, 'Accept/requirement failed');

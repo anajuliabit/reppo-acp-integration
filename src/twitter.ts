@@ -34,6 +34,7 @@ function isRetryableTwitterError(error: Error): boolean {
   const message = error.message.toLowerCase();
   if (message.includes('429') || message.includes('rate limit') || message.includes('too many requests')) return true;
   if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('504')) return true;
+  if (message.includes('security token') || message.includes('expired')) return true;
   if (message.includes('network') || message.includes('timeout') || message.includes('econnreset')) return true;
   return false;
 }

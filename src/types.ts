@@ -126,3 +126,27 @@ export interface DedupState {
   mintedJobs?: string[];
   lastUpdated: string;
 }
+
+/**
+ * Pending job write-ahead log
+ */
+export type PendingJobStatus = 'accepted' | 'minted' | 'completed';
+
+export interface PendingJob {
+  jobId: string;
+  tweetId: string;
+  postUrl: string;
+  subnet: string;
+  buyerId: string | null;
+  agentName?: string;
+  agentDescription?: string;
+  podName?: string;
+  podDescription?: string;
+  status: PendingJobStatus;
+  mintTxHash?: string;
+  podId?: number;
+  createdAt: string;
+  updatedAt: string;
+  retryCount: number;
+  lastError?: string;
+}

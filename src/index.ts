@@ -6,7 +6,8 @@ import { initTwitterClient } from './twitter.js';
 import { initAcp } from './acp.js';
 import { initDedup, getProcessedCount } from './lib/dedup.js';
 import { initPods } from './lib/pods.js';
-import { handlePublishJob } from './handlers/publish.js';
+import { initPendingJobs } from './lib/pending-jobs.js';
+import { handlePublishJob, retryPendingJobs } from './handlers/publish.js';
 import { createLogger } from './lib/logger.js';
 
 const log = createLogger('main');
@@ -83,6 +84,7 @@ async function main() {
   // Initialize file paths and dedup state
   initReppoFiles(config.DATA_DIR);
   initDedup(config.DATA_DIR);
+  initPendingJobs(config.DATA_DIR);
   initPods(config);
 
   // Start health server
@@ -111,6 +113,9 @@ async function main() {
   // Wire up AA client for gasless transactions (Alchemy paymaster)
   setAaClient(clients, acp.contractClient, config.ACP_WALLET_ADDRESS as `0x${string}`);
   log.info({ aaWallet: config.ACP_WALLET_ADDRESS }, 'AA client wired for gasless transactions');
+
+  // Retry any incomplete jobs from previous run
+  await retryPendingJobs(clients, session, config, acp);
 
   // Mark as healthy
   serviceState.healthy = true;

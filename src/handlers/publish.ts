@@ -4,10 +4,37 @@ import { TWITTER_URL_REGEX } from '../constants.js';
 import { submitPodMetadata, getOrCreateBuyerAgent, getSubnets } from '../reppo.js';
 import { hasProcessed, markProcessed, acquireProcessingLock, hasJobMinted, markJobMinted } from '../lib/dedup.js';
 import { savePod, getJobMint } from '../lib/pods.js';
+import {
+  savePendingJob,
+  updatePendingJobStatus,
+  removePendingJob,
+  getPendingJobs,
+  getPendingJob,
+  recordPendingJobError,
+} from '../lib/pending-jobs.js';
 import { createLogger } from '../lib/logger.js';
-import type { Clients, AgentSession, AcpDeliverable, AcpJob, ParsedJobContent } from '../types.js';
+import type { Clients, AgentSession, AcpDeliverable, AcpJob, ParsedJobContent, PendingJob } from '../types.js';
 import type { Config } from '../config.js';
 import type { AcpContext } from '../acp.js';
+
+/**
+ * Reject a job by ID using the ACP client (for cases where we don't have the job object)
+ */
+async function rejectJobById(acpClient: AcpContext['client'], jobId: string, reason: string): Promise<boolean> {
+  try {
+    const job = await acpClient.getJobById(Number(jobId));
+    if (job) {
+      await job.reject(reason);
+      log.info({ jobId, reason }, 'Job rejected via ACP');
+      return true;
+    }
+    log.warn({ jobId }, 'Could not fetch job from ACP to reject');
+    return false;
+  } catch (err) {
+    log.error({ jobId, error: (err as Error).message }, 'Failed to reject job via ACP');
+    return false;
+  }
+}
 
 const log = createLogger('publish');
 
@@ -178,6 +205,24 @@ export async function handlePublishJob(
         await job.accept(`Processing X post for pod minting. Please include a "subnet" field (name or ID) in your job payload. You can ask the Reppo agent for a list of available subnets.${subnetInfo}`);
         log.info({ jobId, tweetId, phase }, 'Job accepted');
       }
+
+      // Checkpoint A: persist job after accepting
+      await savePendingJob({
+        jobId: String(jobId),
+        tweetId,
+        postUrl: content.postUrl,
+        subnet: content.subnet,
+        buyerId: getBuyerId(job),
+        agentName: content.agentName,
+        agentDescription: content.agentDescription,
+        podName: content.podName,
+        podDescription: content.podDescription,
+        status: 'accepted',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        retryCount: 0,
+      });
+
       // Post requirement so buyer can payAndAcceptRequirement
       await (job as any).createRequirement(`Pod minting for X post. Pay to proceed. Required fields: "postUrl" (X/Twitter URL) and "subnet" (subnet name or ID). You can ask the Reppo agent for the list of available subnets.${subnetInfo}`);
       log.info({ jobId, tweetId, phase }, 'Requirement posted, waiting for buyer payment');
@@ -190,6 +235,25 @@ export async function handlePublishJob(
 
   // Phase 2+ (TRANSACTION): Buyer has paid, do the work
   log.info({ jobId, tweetId, phase }, 'Buyer paid, processing...');
+
+  // Checkpoint B: ensure job is tracked even if we missed phase 0-1
+  if (!getPendingJob(String(jobId))) {
+    await savePendingJob({
+      jobId: String(jobId),
+      tweetId,
+      postUrl: content.postUrl,
+      subnet: content.subnet,
+      buyerId: getBuyerId(job),
+      agentName: content.agentName,
+      agentDescription: content.agentDescription,
+      podName: content.podName,
+      podDescription: content.podDescription,
+      status: 'accepted',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      retryCount: 0,
+    });
+  }
 
   try {
 
@@ -242,6 +306,12 @@ export async function handlePublishJob(
     // Mark job as minted IMMEDIATELY to prevent duplicate mints
     await markJobMinted(jobId);
     await markProcessed(tweetId);
+
+    // Checkpoint C: record mint success so retry can resume from here
+    await updatePendingJobStatus(String(jobId), 'minted', {
+      mintTxHash: mintResult.txHash,
+      podId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
+    });
 
     // Track pod for emissions distribution (wallet that requested the pod)
     const buyerWallet = buyerId ?? clients.account.address;
@@ -305,9 +375,15 @@ export async function handlePublishJob(
     await job.deliver(deliverable);
     log.info({ jobId, basescanUrl }, 'Job delivered successfully');
 
+    // Checkpoint D: job fully completed, remove from WAL
+    await removePendingJob(String(jobId));
+
   } catch (err) {
     const errorMsg = (err as Error).message ?? String(err);
     log.error({ jobId, tweetId, error: errorMsg }, 'Job processing failed');
+
+    // Checkpoint E: record error for retry
+    await recordPendingJobError(String(jobId), errorMsg);
 
     // Reject job if we can't fulfill it (insufficient funds, etc.)
     if (errorMsg.includes('Insufficient REPPO')) {
@@ -320,5 +396,152 @@ export async function handlePublishJob(
     }
   } finally {
     releaseLock();
+  }
+}
+
+const ACCEPTED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+
+/**
+ * Retry incomplete pending jobs on startup.
+ * - 'accepted': re-mint from scratch (buyer likely paid but we crashed before minting)
+ * - 'minted': pod exists on-chain, just need DynamoDB + metadata
+ */
+export async function retryPendingJobs(
+  clients: Clients,
+  session: AgentSession,
+  config: Config,
+  acpContext?: AcpContext,
+): Promise<void> {
+  const pending = getPendingJobs();
+  if (pending.length === 0) {
+    log.info('No pending jobs to retry');
+    return;
+  }
+
+  log.info({ count: pending.length }, 'Retrying pending jobs...');
+
+  for (const pj of pending) {
+    try {
+      if (pj.status === 'accepted') {
+        // Skip if older than 24h — buyer likely never paid, but reject to be safe
+        const age = Date.now() - new Date(pj.createdAt).getTime();
+        if (age > ACCEPTED_MAX_AGE_MS) {
+          log.info({ jobId: pj.jobId }, 'Accepted job older than 24h, rejecting');
+          if (acpContext) {
+            await rejectJobById(acpContext.client, pj.jobId, 'Job expired (accepted over 24h ago)');
+          }
+          await removePendingJob(pj.jobId);
+          continue;
+        }
+
+        // Check dedup — already processed?
+        const tweetId = extractTweetId(pj.postUrl);
+        if (hasProcessed(tweetId)) {
+          log.warn({ jobId: pj.jobId, tweetId }, 'Tweet already processed, rejecting job');
+          if (acpContext) {
+            await rejectJobById(acpContext.client, pj.jobId, `Tweet ${tweetId} already processed`);
+          } else {
+            log.warn({ jobId: pj.jobId }, 'No ACP context available to reject job — buyer will not be refunded');
+          }
+          await removePendingJob(pj.jobId);
+          continue;
+        }
+
+        // Fetch tweet
+        const tweet = await fetchTweet(tweetId);
+
+        // Mint pod
+        const mintResult = await mintPod(clients);
+        await markJobMinted(pj.jobId);
+        await markProcessed(tweetId);
+
+        await updatePendingJobStatus(pj.jobId, 'minted', {
+          mintTxHash: mintResult.txHash,
+          podId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
+        });
+
+        // Save pod to DynamoDB
+        const buyerWallet = pj.buyerId ?? clients.account.address;
+        if (mintResult.podId) {
+          await savePod(
+            Number(mintResult.podId),
+            buyerWallet,
+            mintResult.txHash,
+            undefined,
+            Number(pj.jobId),
+          );
+        }
+
+        // Submit metadata
+        let publishSession = session;
+        if (pj.buyerId && pj.agentName) {
+          const buyerSession = await getOrCreateBuyerAgent(config, pj.buyerId, pj.agentName, pj.agentDescription);
+          if (buyerSession) publishSession = buyerSession;
+        }
+
+        const title = pj.podName || (tweet.text.length > 100 ? tweet.text.slice(0, 97) + '...' : tweet.text);
+        const description = pj.podDescription || tweet.text;
+
+        await submitPodMetadata(publishSession, config, {
+          txHash: mintResult.txHash,
+          title,
+          description,
+          url: pj.postUrl,
+          imageUrl: tweet.mediaUrls[0],
+          tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
+          category: 'social',
+          subnetId: pj.subnet,
+        });
+
+        await removePendingJob(pj.jobId);
+        log.info({ jobId: pj.jobId }, 'Pending job retried successfully (accepted → completed)');
+
+      } else if (pj.status === 'minted') {
+        // Pod minted on-chain but DynamoDB/metadata failed
+        const buyerWallet = pj.buyerId ?? clients.account.address;
+        if (pj.podId && pj.mintTxHash) {
+          await savePod(
+            pj.podId,
+            buyerWallet,
+            pj.mintTxHash as `0x${string}`,
+            undefined,
+            Number(pj.jobId),
+          );
+        }
+
+        // Fetch tweet for metadata content
+        const tweetId = extractTweetId(pj.postUrl);
+        const tweet = await fetchTweet(tweetId);
+
+        let publishSession = session;
+        if (pj.buyerId && pj.agentName) {
+          const buyerSession = await getOrCreateBuyerAgent(config, pj.buyerId, pj.agentName, pj.agentDescription);
+          if (buyerSession) publishSession = buyerSession;
+        }
+
+        const title = pj.podName || (tweet.text.length > 100 ? tweet.text.slice(0, 97) + '...' : tweet.text);
+        const description = pj.podDescription || tweet.text;
+
+        if (pj.mintTxHash) {
+          await submitPodMetadata(publishSession, config, {
+            txHash: pj.mintTxHash as `0x${string}`,
+            title,
+            description,
+            url: pj.postUrl,
+            imageUrl: tweet.mediaUrls[0],
+            tokenId: pj.podId,
+            category: 'social',
+            subnetId: pj.subnet,
+          });
+        }
+
+        await removePendingJob(pj.jobId);
+        log.info({ jobId: pj.jobId }, 'Pending job retried successfully (minted → completed)');
+      }
+    } catch (err) {
+      const errorMsg = (err as Error).message ?? String(err);
+      log.error({ jobId: pj.jobId, error: errorMsg }, 'Pending job retry failed');
+      await recordPendingJobError(pj.jobId, errorMsg);
+    }
   }
 }

@@ -6,5 +6,6 @@ dist/
 .reppo-session.json
 .reppo-buyer-sessions.json
 .reppo-dedup.json
+.reppo-pending-jobs.json
 .env
 .env.swp

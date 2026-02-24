@@ -2,18 +2,32 @@
 
 ## Context
 
-Reppodant currently only processes jobs via Virtuals ACP (agent-to-agent). Human users on X can't interact with it directly. This feature adds a parallel flow: users mention @reppodant on X, the agent responds conversationally (Claude-powered, degen personality), collects USDC payment via a unique deposit address, mints a pod, and replies with the result. The existing ACP flow is unchanged — both run side-by-side.
+Reppodant currently only processes jobs via Virtuals ACP (agent-to-agent). Human users on X can't interact with it directly. This feature adds a **separate server** that runs alongside the ACP agent: it listens for @reppodant mentions on X, responds conversationally (Claude-powered, degen personality), collects USDC payment via a unique deposit address, mints a pod, and replies with the result. The existing ACP agent is completely untouched — both run as independent processes.
 
 ## Architecture Overview
 
-Three new concurrent loops alongside the existing ACP polling:
+Two independent processes sharing the same codebase and on-disk state:
 
 ```
-index.ts main()
-  ├── ACP job poll loop (~10s)          ← existing, unchanged
-  ├── X mention poll loop (~45s)        ← NEW
-  └── Payment monitor loop (~15s)       ← NEW
+Process 1: ACP Agent (src/index.ts)        ← existing, UNCHANGED
+  └── ACP job poll loop (~10s)
+
+Process 2: Mention Server (src/mention-server.ts)   ← NEW
+  ├── X mention poll loop (~45s)
+  └── Payment monitor loop (~15s)
 ```
+
+**Why separate processes?**
+- **Fault isolation** — mention server crash doesn't affect ACP job processing
+- **Independent deploys** — update/restart mention server without touching ACP agent
+- **Simpler code** — no feature flags, no shared shutdown orchestration in `index.ts`
+- **Cleaner ops** — separate logs, separate resource profiles, independent scaling
+
+Both processes share:
+- Shared libs (`chain.ts`, `reppo.ts`, `types.ts`, `constants.ts`, `config.ts`)
+- File-based dedup (`src/lib/dedup.ts`) — already works across processes via filesystem
+- Twitter client setup (`src/twitter.ts`)
+- On-chain interactions (`mintPod()`, `submitPodMetadata()`, `getSubnets()`)
 
 Flow: mention detected → Claude classifies intent (Haiku) → if mint request: derive HD deposit address → reply with payment instructions → monitor for USDC → mint pod (reuse existing `mintPod()` + `submitPodMetadata()`) → reply with result → sweep deposit.
 
@@ -31,6 +45,7 @@ No other new deps. viem already has `mnemonicToAccount` for HD derivation. `twit
 
 | File | Purpose |
 |------|---------|
+| `src/mention-server.ts` | Entry point for the mention server — boots Twitter client, starts mention + payment loops, handles graceful shutdown |
 | `src/mentions/listener.ts` | Mention polling loop, since_id tracking, rate limiting, dispatches to intent classifier |
 | `src/mentions/intent.ts` | Claude Haiku intent classification + Sonnet reply generation |
 | `src/mentions/prompts.ts` | System prompt (degen personality), classification template, reply template |
@@ -44,15 +59,20 @@ No other new deps. viem already has `mnemonicToAccount` for HD derivation. `twit
 |------|---------|
 | `src/types.ts` | Add `MentionIntent`, `ClassifiedMention`, `MentionRequest`, `MentionRequestStatus`, `MentionListenerState` |
 | `src/constants.ts` | Add `USDC_DECIMALS = 6`, add `transfer` + `Transfer` event to `ERC20_ABI` |
-| `src/config.ts` | Add env vars: `ANTHROPIC_API_KEY`, `HD_WALLET_SEED`, `MENTION_FLOW_ENABLED`, `MENTION_POLL_INTERVAL_MS`, `PAYMENT_POLL_INTERVAL_MS`, `PAYMENT_TIMEOUT_MS`, `MINT_PRICE_USDC`, `DEFAULT_SUBNET_ID` |
+| `src/config.ts` | Add env vars: `ANTHROPIC_API_KEY`, `HD_WALLET_SEED`, `MENTION_POLL_INTERVAL_MS`, `PAYMENT_POLL_INTERVAL_MS`, `PAYMENT_TIMEOUT_MS`, `MINT_PRICE_USDC`, `DEFAULT_SUBNET_ID` |
 | `src/twitter.ts` | Add `fetchMentions(sinceId?)` and `replyToTweet(inReplyToId, text)` |
-| `src/index.ts` | Init mention subsystem when `MENTION_FLOW_ENABLED=true`, start mention + payment loops as parallel promises, shared shutdown signal |
 
 ### Unchanged Files
 
-`src/handlers/publish.ts`, `src/chain.ts`, `src/reppo.ts`, `src/acp.ts`, `src/lib/dedup.ts`, `src/lib/pending-jobs.ts`, `src/lib/pods.ts` — reused as-is by the mention pipeline.
+`src/index.ts`, `src/handlers/publish.ts`, `src/chain.ts`, `src/reppo.ts`, `src/acp.ts`, `src/lib/dedup.ts`, `src/lib/pending-jobs.ts`, `src/lib/pods.ts` — reused as-is by the mention pipeline.
 
 ## Key Design Decisions
+
+### Separate Server, Shared Libs
+
+The mention server (`src/mention-server.ts`) is a standalone entry point that imports from the same shared modules as `src/index.ts`. No code in the ACP agent is modified. Cross-process coordination happens through:
+- **File-based dedup** (`hasProcessed(tweetId)`) — prevents double-minting if a tweet is submitted via both ACP and mention
+- **On-chain state** — both processes read the same contract state
 
 ### Intent Classification (Claude Haiku)
 
@@ -87,7 +107,7 @@ User mentions @reppodant with tweet URL
 - 45-second mention polling interval (~20 requests/15min, under the mentions endpoint limit)
 - In-memory set of replied mention IDs prevents double-processing
 - Persisted `sinceId` prevents reprocessing across restarts
-- Shared dedup (`hasProcessed(tweetId)`) prevents double-minting across ACP + mention flows
+- Shared dedup (`hasProcessed(tweetId)`) prevents double-minting across ACP + mention flows (file-based, works cross-process)
 
 ### Personality (System Prompt)
 
@@ -139,17 +159,30 @@ interface MentionListenerState {
 9. `src/mentions/pipeline.ts` — `startMintRequest()`, `paymentMonitorLoop()`, `executeMint()`
 10. `src/mentions/listener.ts` — mention poll loop, intent dispatch
 
-**Phase 5 — Integration**
-11. `src/index.ts` — wire init + parallel loops + shared shutdown
+**Phase 5 — Server Entry Point**
+11. `src/mention-server.ts` — boot Twitter client, init state, start loops, graceful shutdown
 
 **Phase 6 — Tests**
 12. Unit tests for each new module (mock Claude, mock Twitter, mock chain)
+
+## Running
+
+```bash
+# ACP agent (existing, unchanged)
+npx tsx src/index.ts
+
+# Mention server (new, separate process)
+npx tsx src/mention-server.ts
+```
+
+Both can run on the same machine or separate hosts — they only share the filesystem for dedup/state and the same RPC + contract config.
 
 ## Verification
 
 1. `npx tsc --noEmit` — clean build
 2. `npx vitest run` — all tests pass
-3. Manual test flow: set `MENTION_FLOW_ENABLED=true`, mention @reppodant with a tweet URL, verify deposit address reply, send USDC, verify mint + result reply
+3. Manual test: start mention server, mention @reppodant with a tweet URL, verify deposit address reply, send USDC, verify mint + result reply
+4. Verify ACP agent still works independently with no changes
 
 ## Risks
 
@@ -161,3 +194,4 @@ interface MentionListenerState {
 | Claude hallucinates a tweet URL | Independently validate against `TWITTER_URL_REGEX` + `fetchTweet()` |
 | Payment received but mint fails | USDC stays in deposit address. v1: manual refund. v2: automated refund sweep |
 | Rate limits on mentions endpoint | 45s polling is conservative. Cache `client.v2.me()` result |
+| Cross-process dedup race condition | File-based dedup with locking (existing pattern in `pending-jobs.ts`) handles this |

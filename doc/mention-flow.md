@@ -1,0 +1,163 @@
+# X Mention → Conversational Agent → Pod Mint
+
+## Context
+
+Reppodant currently only processes jobs via Virtuals ACP (agent-to-agent). Human users on X can't interact with it directly. This feature adds a parallel flow: users mention @reppodant on X, the agent responds conversationally (Claude-powered, degen personality), collects USDC payment via a unique deposit address, mints a pod, and replies with the result. The existing ACP flow is unchanged — both run side-by-side.
+
+## Architecture Overview
+
+Three new concurrent loops alongside the existing ACP polling:
+
+```
+index.ts main()
+  ├── ACP job poll loop (~10s)          ← existing, unchanged
+  ├── X mention poll loop (~45s)        ← NEW
+  └── Payment monitor loop (~15s)       ← NEW
+```
+
+Flow: mention detected → Claude classifies intent (Haiku) → if mint request: derive HD deposit address → reply with payment instructions → monitor for USDC → mint pod (reuse existing `mintPod()` + `submitPodMetadata()`) → reply with result → sweep deposit.
+
+## New Dependencies
+
+```
+@anthropic-ai/sdk    — Claude API (Haiku for classification, Sonnet for replies)
+```
+
+No other new deps. viem already has `mnemonicToAccount` for HD derivation. `twitter-api-v2` already supports `.v2.reply()` and `.v2.userMentionTimeline()`.
+
+## File Plan
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `src/mentions/listener.ts` | Mention polling loop, since_id tracking, rate limiting, dispatches to intent classifier |
+| `src/mentions/intent.ts` | Claude Haiku intent classification + Sonnet reply generation |
+| `src/mentions/prompts.ts` | System prompt (degen personality), classification template, reply template |
+| `src/mentions/payment.ts` | HD wallet derivation (`mnemonicToAccount`), USDC balance checking, deposit sweep |
+| `src/mentions/pipeline.ts` | Orchestrator: `startMintRequest()`, `paymentMonitorLoop()`, `executeMint()` |
+| `src/lib/mention-state.ts` | WAL for mention requests (mirrors `pending-jobs.ts` patterns — file lock, in-memory cache) |
+
+### Modified Files
+
+| File | Changes |
+|------|---------|
+| `src/types.ts` | Add `MentionIntent`, `ClassifiedMention`, `MentionRequest`, `MentionRequestStatus`, `MentionListenerState` |
+| `src/constants.ts` | Add `USDC_DECIMALS = 6`, add `transfer` + `Transfer` event to `ERC20_ABI` |
+| `src/config.ts` | Add env vars: `ANTHROPIC_API_KEY`, `HD_WALLET_SEED`, `MENTION_FLOW_ENABLED`, `MENTION_POLL_INTERVAL_MS`, `PAYMENT_POLL_INTERVAL_MS`, `PAYMENT_TIMEOUT_MS`, `MINT_PRICE_USDC`, `DEFAULT_SUBNET_ID` |
+| `src/twitter.ts` | Add `fetchMentions(sinceId?)` and `replyToTweet(inReplyToId, text)` |
+| `src/index.ts` | Init mention subsystem when `MENTION_FLOW_ENABLED=true`, start mention + payment loops as parallel promises, shared shutdown signal |
+
+### Unchanged Files
+
+`src/handlers/publish.ts`, `src/chain.ts`, `src/reppo.ts`, `src/acp.ts`, `src/lib/dedup.ts`, `src/lib/pending-jobs.ts`, `src/lib/pods.ts` — reused as-is by the mention pipeline.
+
+## Key Design Decisions
+
+### Intent Classification (Claude Haiku)
+
+Each mention is classified into one of: `mint_request`, `question_subnets`, `question_pricing`, `status_check`, `irrelevant`. Haiku returns structured JSON with intent, extracted tweet URL, subnet hint, and confidence score. Low-confidence (<0.5) mentions are skipped. Irrelevant mentions with high confidence are silently ignored.
+
+### Payment Flow (Unique HD Address Per Request)
+
+```
+User mentions @reppodant with tweet URL
+  → Derive address at index N via mnemonicToAccount(HD_WALLET_SEED, { addressIndex: N })
+  → Reply: "send 5 USDC to 0x... on Base"
+  → Payment monitor polls balanceOf(depositAddress) every 15s
+  → When balance >= expected: scan Transfer events to find sender address
+  → Sender address = buyer wallet (used for pod tracking / emissions)
+  → Mint → reply with result → sweep USDC to main wallet
+```
+
+`HD_WALLET_SEED` is a BIP-39 mnemonic stored as env var (separate from `PRIVATE_KEY` for security). Derivation index is monotonically increasing, persisted in mention state file.
+
+**Sweep caveat**: Deposit addresses need ETH for gas to transfer USDC out. The sweep function sends a tiny ETH amount (~0.0001) from the main wallet first, then transfers USDC back. Acceptable cost on Base.
+
+### Subnet Selection
+
+1. Claude extracts subnet hint from mention text (e.g., "mint this in crypto subnet")
+2. Resolve name → ID using existing `getSubnets()` logic
+3. Fall back to `DEFAULT_SUBNET_ID` from config
+4. If no default, reply asking user to specify
+
+### Rate Limiting
+
+- Max 25 replies per 15-minute window (under Twitter's 50/15min limit)
+- 45-second mention polling interval (~20 requests/15min, under the mentions endpoint limit)
+- In-memory set of replied mention IDs prevents double-processing
+- Persisted `sinceId` prevents reprocessing across restarts
+- Shared dedup (`hasProcessed(tweetId)`) prevents double-minting across ACP + mention flows
+
+### Personality (System Prompt)
+
+Degen/crypto-native: uses crypto slang (gm, ser, fren, lfg, based, wagmi) naturally but not excessively. Concise and punchy (Twitter-native — under 280 chars). Knowledgeable about Reppo, pods, subnets. Slightly sarcastic but never rude. Never gives financial advice.
+
+## State Machine
+
+```
+mention → classify intent
+  ├── mint_request → derive address → PENDING_PAYMENT
+  │     ├── (USDC detected) → PAID → MINTING → SUBMITTING_METADATA → COMPLETED → reply + sweep
+  │     ├── (timeout 1hr) → EXPIRED → notify user
+  │     └── (mint error) → FAILED → notify user
+  ├── question → generate reply → reply
+  └── irrelevant → skip
+```
+
+### Persistence (`src/lib/mention-state.ts`)
+
+State file: `.reppo-mention-state.json` — same patterns as `pending-jobs.ts` (in-memory Map + file locking + periodic persist).
+
+```ts
+interface MentionListenerState {
+  sinceId?: string;                   // resume from last seen mention
+  lastPollAt?: string;
+  nextDerivationIndex: number;        // monotonically increasing, never reuse
+  activeRequests: MentionRequest[];   // pending_payment / paid / minting
+  completedRequestIds: string[];      // trimmed to last 2000
+}
+```
+
+## Implementation Order
+
+**Phase 1 — Foundation** (types, config, state persistence)
+1. `src/types.ts` — new interfaces
+2. `src/constants.ts` — USDC_DECIMALS, ERC20_ABI additions
+3. `src/config.ts` — new env vars with defaults
+4. `src/lib/mention-state.ts` — WAL for mention requests
+
+**Phase 2 — Twitter + HD Wallet**
+5. `src/twitter.ts` — add `fetchMentions()` and `replyToTweet()`
+6. `src/mentions/payment.ts` — HD derivation, USDC balance check, sweep
+
+**Phase 3 — Claude Integration**
+7. `src/mentions/prompts.ts` — system prompt + templates
+8. `src/mentions/intent.ts` — classification + reply generation
+
+**Phase 4 — Pipeline**
+9. `src/mentions/pipeline.ts` — `startMintRequest()`, `paymentMonitorLoop()`, `executeMint()`
+10. `src/mentions/listener.ts` — mention poll loop, intent dispatch
+
+**Phase 5 — Integration**
+11. `src/index.ts` — wire init + parallel loops + shared shutdown
+
+**Phase 6 — Tests**
+12. Unit tests for each new module (mock Claude, mock Twitter, mock chain)
+
+## Verification
+
+1. `npx tsc --noEmit` — clean build
+2. `npx vitest run` — all tests pass
+3. Manual test flow: set `MENTION_FLOW_ENABLED=true`, mention @reppodant with a tweet URL, verify deposit address reply, send USDC, verify mint + result reply
+
+## Risks
+
+| Risk | Mitigation |
+|------|-----------|
+| Twitter OAuth app needs Read+Write permissions | Verify in Developer Portal before starting |
+| HD wallet seed compromise → all deposit addresses exposed | Separate mnemonic from PRIVATE_KEY, same security posture |
+| Deposit address needs ETH for sweep | Sweep fn sends tiny ETH from main wallet first (~$0.001 on Base) |
+| Claude hallucinates a tweet URL | Independently validate against `TWITTER_URL_REGEX` + `fetchTweet()` |
+| Payment received but mint fails | USDC stays in deposit address. v1: manual refund. v2: automated refund sweep |
+| Rate limits on mentions endpoint | 45s polling is conservative. Cache `client.v2.me()` result |

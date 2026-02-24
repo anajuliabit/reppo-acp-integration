@@ -1,6 +1,6 @@
 import { extractTweetId, fetchTweet } from '../twitter.js';
 import { mintPod } from '../chain.js';
-import { TWITTER_URL_REGEX } from '../constants.js';
+import { TWITTER_URL_REGEX, MAX_SUBNETS_PER_JOB } from '../constants.js';
 import { submitPodMetadata, getOrCreateBuyerAgent, getSubnets } from '../reppo.js';
 import { hasProcessed, markProcessed, acquireProcessingLock, hasJobMinted, markJobMinted } from '../lib/dedup.js';
 import { savePod, getJobMint } from '../lib/pods.js';
@@ -39,34 +39,50 @@ async function rejectJobById(acpClient: AcpContext['client'], jobId: string, rea
 const log = createLogger('publish');
 
 /**
+ * Normalize subnet input to a string array.
+ * Accepts: subnets: string[], subnet: "a, b" (comma-separated), subnet: "single"
+ */
+function normalizeSubnets(source: Record<string, unknown>): string[] | undefined {
+  // Prefer subnets array
+  if (Array.isArray(source?.subnets)) {
+    return source.subnets.map((s: unknown) => String(s).trim()).filter(Boolean);
+  }
+  // Fall back to subnet string (comma-separated or single)
+  if (typeof source?.subnet === 'string' && source.subnet.trim()) {
+    return source.subnet.split(',').map((s: string) => s.trim()).filter(Boolean);
+  }
+  return undefined;
+}
+
+/**
  * Parse job content from ACP memos
  */
 function parseJobContent(job: AcpJob): ParsedJobContent {
   const memos = job.memos ?? [];
   const result: ParsedJobContent = {};
-  
+
   for (const memo of memos) {
     try {
-      const content = typeof memo.content === 'string' 
-        ? JSON.parse(memo.content) 
+      const content = typeof memo.content === 'string'
+        ? JSON.parse(memo.content)
         : memo.content;
-      
+
       // Check top-level and nested under "requirement" (ACP SDK wraps serviceRequirements there)
       const req = content?.requirement ?? content;
       if (req?.postUrl && !result.postUrl) result.postUrl = req.postUrl;
-      if (req?.subnet && !result.subnet) result.subnet = req.subnet;
+      if (!result.subnets) result.subnets = normalizeSubnets(req);
       if (req?.agentName && !result.agentName) result.agentName = req.agentName;
       if (req?.agentDescription && !result.agentDescription) result.agentDescription = req.agentDescription;
       if (req?.podName && !result.podName) result.podName = req.podName;
       if (req?.podDescription && !result.podDescription) result.podDescription = req.podDescription;
       // Also check top-level in case it's not nested
       if (content?.postUrl && !result.postUrl) result.postUrl = content.postUrl;
-      if (content?.subnet && !result.subnet) result.subnet = content.subnet;
+      if (!result.subnets) result.subnets = normalizeSubnets(content);
     } catch {
       // Not JSON, skip
     }
   }
-  
+
   return result;
 }
 
@@ -118,36 +134,49 @@ export async function handlePublishJob(
     return;
   }
 
-  if (!content.subnet) {
+  if (!content.subnets || content.subnets.length === 0) {
     log.warn({ jobId }, 'Missing subnet');
     await job.reject('Missing subnet in job payload');
     return;
   }
 
-  // Validate subnet against available subnets and resolve name to ID
+  if (content.subnets.length > MAX_SUBNETS_PER_JOB) {
+    log.warn({ jobId, count: content.subnets.length }, 'Too many subnets');
+    await job.reject(`Too many subnets (${content.subnets.length}). Maximum is ${MAX_SUBNETS_PER_JOB}.`);
+    return;
+  }
+
+  // Validate all subnets and resolve names to IDs
   try {
     const subnets = await getSubnets(config);
     const raw = (subnets as any)?.data;
     const subnetList: any[] = raw?.privateSubnets ?? raw?.subnets ?? (Array.isArray(raw) ? raw : []);
     const validIds = subnetList.map((s: any) => String(s.id));
     const normalize = (s: string) => s.toLowerCase().replace(/[\s_-]+/g, '_');
-    const validNames = subnetList.map((s: any) => normalize(String(s.subnet ?? s.name ?? '')));
-    const needle = normalize(String(content.subnet));
-    if (subnetList.length > 0 && !validIds.includes(content.subnet) && !validNames.includes(needle)) {
-      log.warn({ jobId, subnet: content.subnet, validIds }, 'Invalid subnet');
-      await job.reject(`Invalid subnetId "${content.subnet}". Available: ${subnetList.map((s: any) => `${s.subnet || s.name} (id: ${s.id})`).join(', ')}`);
-      return;
-    }
-    // If buyer sent a name instead of an ID, resolve it to the actual ID
-    if (subnetList.length > 0 && !validIds.includes(content.subnet)) {
-      const match = subnetList.find((s: any) => normalize(String(s.subnet ?? s.name ?? '')) === needle);
-      if (match) {
-        log.info({ jobId, from: content.subnet, to: match.id }, 'Resolved subnet name to ID');
-        content.subnet = String(match.id);
+
+    if (subnetList.length > 0) {
+      const resolvedIds: string[] = [];
+      for (const sn of content.subnets) {
+        if (validIds.includes(sn)) {
+          resolvedIds.push(sn);
+        } else {
+          const needle = normalize(sn);
+          const match = subnetList.find((s: any) => normalize(String(s.subnet ?? s.name ?? '')) === needle);
+          if (match) {
+            log.info({ jobId, from: sn, to: match.id }, 'Resolved subnet name to ID');
+            resolvedIds.push(String(match.id));
+          } else {
+            log.warn({ jobId, subnet: sn, validIds }, 'Invalid subnet');
+            await job.reject(`Invalid subnet "${sn}". Available: ${subnetList.map((s: any) => `${s.subnet || s.name} (id: ${s.id})`).join(', ')}`);
+            return;
+          }
+        }
       }
+      // Deduplicate resolved IDs
+      content.subnets = [...new Set(resolvedIds)];
     }
   } catch (err) {
-    log.warn({ jobId, error: (err as Error).message }, 'Failed to validate subnet, proceeding anyway');
+    log.warn({ jobId, error: (err as Error).message }, 'Failed to validate subnets, proceeding anyway');
   }
 
   // Validate URL format
@@ -202,7 +231,7 @@ export async function handlePublishJob(
       }
 
       if (phase === 0) {
-        await job.accept(`Processing X post for pod minting. Please include a "subnet" field (name or ID) in your job payload. You can ask the Reppo agent for a list of available subnets.${subnetInfo}`);
+        await job.accept(`Processing X post for pod minting. Please include a "subnet" field (name or ID, comma-separated for multiple) or "subnets" array in your job payload. You can ask the Reppo agent for a list of available subnets.${subnetInfo}`);
         log.info({ jobId, tweetId, phase }, 'Job accepted');
       }
 
@@ -211,7 +240,7 @@ export async function handlePublishJob(
         jobId: String(jobId),
         tweetId,
         postUrl: content.postUrl,
-        subnet: content.subnet,
+        subnets: content.subnets!,
         buyerId: getBuyerId(job),
         agentName: content.agentName,
         agentDescription: content.agentDescription,
@@ -224,7 +253,7 @@ export async function handlePublishJob(
       });
 
       // Post requirement so buyer can payAndAcceptRequirement
-      await (job as any).createRequirement(`Pod minting for X post. Pay to proceed. Required fields: "postUrl" (X/Twitter URL) and "subnet" (subnet name or ID). You can ask the Reppo agent for the list of available subnets.${subnetInfo}`);
+      await (job as any).createRequirement(`Pod minting for X post. Pay to proceed. Required fields: "postUrl" (X/Twitter URL) and "subnet" (name or ID, comma-separated for multiple) or "subnets" array. You can ask the Reppo agent for the list of available subnets.${subnetInfo}`);
       log.info({ jobId, tweetId, phase }, 'Requirement posted, waiting for buyer payment');
     } catch (err) {
       log.warn({ jobId, tweetId, error: (err as Error).message }, 'Accept/requirement failed');
@@ -242,7 +271,7 @@ export async function handlePublishJob(
       jobId: String(jobId),
       tweetId,
       postUrl: content.postUrl,
-      subnet: content.subnet,
+      subnets: content.subnets!,
       buyerId: getBuyerId(job),
       agentName: content.agentName,
       agentDescription: content.agentDescription,
@@ -342,38 +371,52 @@ export async function handlePublishJob(
       }
     }
 
-    // Submit metadata to Reppo (use custom name/description if provided, otherwise from tweet)
+    // Submit metadata to each subnet (non-fatal per-subnet)
     const title = content.podName || (tweet.text.length > 100 ? tweet.text.slice(0, 97) + '...' : tweet.text);
     const description = content.podDescription || tweet.text;
-    
-    // Submit metadata to Reppo (non-fatal if it fails)
-    try {
-      await submitPodMetadata(publishSession, config, {
-        txHash: mintResult.txHash,
-        title,
-        description,
-        url: content.postUrl,
-        imageUrl: tweet.mediaUrls[0],
-        tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
-        category: 'social',
-        subnetId: content.subnet,
-      });
-      log.info({ jobId }, 'Metadata submitted to Reppo');
-    } catch (metaErr) {
-      log.warn({ jobId, error: metaErr instanceof Error ? metaErr.message : metaErr }, 'Metadata submission failed - pod still minted');
+
+    const completedSubnets: string[] = [];
+    const failedSubnets: string[] = [];
+
+    for (const subnetId of content.subnets!) {
+      try {
+        await submitPodMetadata(publishSession, config, {
+          txHash: mintResult.txHash,
+          title,
+          description,
+          url: content.postUrl,
+          imageUrl: tweet.mediaUrls[0],
+          tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
+          category: 'social',
+          subnetId,
+        });
+        completedSubnets.push(subnetId);
+        log.info({ jobId, subnetId }, 'Metadata submitted to subnet');
+      } catch (metaErr) {
+        failedSubnets.push(subnetId);
+        log.warn({ jobId, subnetId, error: metaErr instanceof Error ? metaErr.message : metaErr }, 'Metadata submission failed for subnet');
+      }
     }
 
-    // Deliver result via ACP
+    if (completedSubnets.length > 0) {
+      log.info({ jobId, completedSubnets }, 'Metadata submitted to subnets');
+    }
+    if (failedSubnets.length > 0) {
+      log.warn({ jobId, failedSubnets }, 'Metadata submission failed for some subnets - pod still minted');
+    }
+
+    // Deliver result via ACP (deliver even on partial failure — pod IS minted)
     const basescanUrl = `https://basescan.org/tx/${mintResult.txHash}`;
     const deliverable: AcpDeliverable = {
       postUrl: content.postUrl,
-      subnet: content.subnet,
+      subnets: completedSubnets,
       txHash: mintResult.txHash,
       podId: mintResult.podId?.toString(),
       basescanUrl,
+      ...(failedSubnets.length > 0 ? { failedSubnets } : {}),
     };
     await job.deliver(deliverable);
-    log.info({ jobId, basescanUrl }, 'Job delivered successfully');
+    log.info({ jobId, basescanUrl, completedSubnets, failedSubnets }, 'Job delivered successfully');
 
     // Checkpoint D: job fully completed, remove from WAL
     await removePendingJob(String(jobId));
@@ -472,7 +515,7 @@ export async function retryPendingJobs(
           );
         }
 
-        // Submit metadata
+        // Submit metadata to each subnet
         let publishSession = session;
         if (pj.buyerId && pj.agentName) {
           const buyerSession = await getOrCreateBuyerAgent(config, pj.buyerId, pj.agentName, pj.agentDescription);
@@ -482,19 +525,28 @@ export async function retryPendingJobs(
         const title = pj.podName || (tweet.text.length > 100 ? tweet.text.slice(0, 97) + '...' : tweet.text);
         const description = pj.podDescription || tweet.text;
 
-        await submitPodMetadata(publishSession, config, {
-          txHash: mintResult.txHash,
-          title,
-          description,
-          url: pj.postUrl,
-          imageUrl: tweet.mediaUrls[0],
-          tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
-          category: 'social',
-          subnetId: pj.subnet,
-        });
+        const completed = pj.completedSubnets ?? [];
+        const remaining = pj.subnets.filter((s) => !completed.includes(s));
+        for (const subnetId of remaining) {
+          try {
+            await submitPodMetadata(publishSession, config, {
+              txHash: mintResult.txHash,
+              title,
+              description,
+              url: pj.postUrl,
+              imageUrl: tweet.mediaUrls[0],
+              tokenId: mintResult.podId !== undefined ? Number(mintResult.podId) : undefined,
+              category: 'social',
+              subnetId,
+            });
+            completed.push(subnetId);
+          } catch (metaErr) {
+            log.warn({ jobId: pj.jobId, subnetId, error: (metaErr as Error).message }, 'Metadata submission failed for subnet during retry');
+          }
+        }
 
         await removePendingJob(pj.jobId);
-        log.info({ jobId: pj.jobId }, 'Pending job retried successfully (accepted → completed)');
+        log.info({ jobId: pj.jobId, completedSubnets: completed }, 'Pending job retried successfully (accepted → completed)');
 
       } else if (pj.status === 'minted') {
         // Pod minted on-chain but DynamoDB/metadata failed
@@ -523,16 +575,25 @@ export async function retryPendingJobs(
         const description = pj.podDescription || tweet.text;
 
         if (pj.mintTxHash) {
-          await submitPodMetadata(publishSession, config, {
-            txHash: pj.mintTxHash as `0x${string}`,
-            title,
-            description,
-            url: pj.postUrl,
-            imageUrl: tweet.mediaUrls[0],
-            tokenId: pj.podId,
-            category: 'social',
-            subnetId: pj.subnet,
-          });
+          const completed = pj.completedSubnets ?? [];
+          const remaining = pj.subnets.filter((s) => !completed.includes(s));
+          for (const subnetId of remaining) {
+            try {
+              await submitPodMetadata(publishSession, config, {
+                txHash: pj.mintTxHash as `0x${string}`,
+                title,
+                description,
+                url: pj.postUrl,
+                imageUrl: tweet.mediaUrls[0],
+                tokenId: pj.podId,
+                category: 'social',
+                subnetId,
+              });
+              completed.push(subnetId);
+            } catch (metaErr) {
+              log.warn({ jobId: pj.jobId, subnetId, error: (metaErr as Error).message }, 'Metadata submission failed for subnet during retry');
+            }
+          }
         }
 
         await removePendingJob(pj.jobId);

@@ -12,6 +12,7 @@ export const SWAP_DEADLINE_SECONDS = 300; // 5 minutes
 
 export const TX_RECEIPT_TIMEOUT = 120_000; // 2 minutes
 export const MAX_RETRIES = 3;
+export const MAX_SUBNETS_PER_JOB = 10;
 export const RETRY_BASE_DELAY = 1000; // 1 second
 
 // Pool fee tiers to try (in order of preference)

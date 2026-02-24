@@ -59,18 +59,19 @@ export interface TweetData {
 
 export interface AcpJobPayload {
   postUrl: string;
-  subnet: string;
+  subnets: string[];
   agentName?: string;
   agentDescription?: string;
 }
 
 export interface AcpDeliverable {
   postUrl: string;
-  subnet: string;
+  subnets: string[];
   txHash: string;
   podId?: string;
   basescanUrl: string;
   reppoUrl?: string;
+  failedSubnets?: string[];
 }
 
 /**
@@ -111,7 +112,7 @@ export interface AcpJob {
  */
 export interface ParsedJobContent {
   postUrl?: string;
-  subnet?: string;
+  subnets?: string[];
   agentName?: string;
   agentDescription?: string;
   podName?: string;
@@ -136,7 +137,7 @@ export interface PendingJob {
   jobId: string;
   tweetId: string;
   postUrl: string;
-  subnet: string;
+  subnets: string[];
   buyerId: string | null;
   agentName?: string;
   agentDescription?: string;
@@ -145,6 +146,7 @@ export interface PendingJob {
   status: PendingJobStatus;
   mintTxHash?: string;
   podId?: number;
+  completedSubnets?: string[];
   createdAt: string;
   updatedAt: string;
   retryCount: number;

@@ -69,6 +69,11 @@ export function initPendingJobs(dataDir: string): void {
       const age = now - new Date(job.updatedAt).getTime();
       if (age > COMPLETED_TTL_MS) continue;
     }
+    // Migrate legacy subnet → subnets
+    if (!job.subnets && (job as any).subnet) {
+      job.subnets = [(job as any).subnet];
+      delete (job as any).subnet;
+    }
     jobs.set(job.jobId, job);
   }
 

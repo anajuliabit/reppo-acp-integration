@@ -29,7 +29,7 @@ Both processes share:
 - Twitter client setup (`src/twitter.ts`)
 - On-chain interactions (`mintPod()`, `submitPodMetadata()`, `getSubnets()`)
 
-Flow: mention detected → Claude classifies intent (Haiku) → if mint request: derive HD deposit address → reply with payment instructions → monitor for USDC → mint pod (reuse existing `mintPod()` + `submitPodMetadata()`) → reply with result → sweep deposit.
+Flow: mention detected → Claude classifies intent (Haiku) → if mint request: derive HD deposit address → reply with payment instructions → monitor for USDC Transfer events → mint pod (reuse existing `mintPod()` + `submitPodMetadata()`) → reply with result → sweep deposit.
 
 ## New Dependencies
 
@@ -49,7 +49,7 @@ No other new deps. viem already has `mnemonicToAccount` for HD derivation. `twit
 | `src/mentions/listener.ts` | Mention polling loop, since_id tracking, rate limiting, dispatches to intent classifier |
 | `src/mentions/intent.ts` | Claude Haiku intent classification + Sonnet reply generation |
 | `src/mentions/prompts.ts` | System prompt (degen personality), classification template, reply template |
-| `src/mentions/payment.ts` | HD wallet derivation (`mnemonicToAccount`), USDC balance checking, deposit sweep |
+| `src/mentions/payment.ts` | HD wallet derivation (`mnemonicToAccount`), Transfer event scanning, deposit sweep |
 | `src/mentions/pipeline.ts` | Orchestrator: `startMintRequest()`, `paymentMonitorLoop()`, `executeMint()` |
 | `src/lib/mention-state.ts` | WAL for mention requests (mirrors `pending-jobs.ts` patterns — file lock, in-memory cache) |
 
@@ -83,14 +83,35 @@ Each mention is classified into one of: `mint_request`, `question_subnets`, `que
 ```
 User mentions @reppodant with tweet URL
   → Derive address at index N via mnemonicToAccount(HD_WALLET_SEED, { addressIndex: N })
+  → Record watchFromBlock = current block number in request state
   → Reply: "send 5 USDC to 0x... on Base"
-  → Payment monitor polls balanceOf(depositAddress) every 15s
-  → When balance >= expected: scan Transfer events to find sender address
-  → Sender address = buyer wallet (used for pod tracking / emissions)
+  → Payment monitor scans Transfer events to depositAddress from watchFromBlock
+  → When matching Transfer found: record txHash as proof of payment
+  → Sender address (from Transfer event) = buyer wallet (used for pod tracking / emissions)
   → Mint → reply with result → sweep USDC to main wallet
 ```
 
 `HD_WALLET_SEED` is a BIP-39 mnemonic stored as env var (separate from `PRIVATE_KEY` for security). Derivation index is monotonically increasing, persisted in mention state file.
+
+### Payment Detection: Transfer Events, Not balanceOf
+
+Payment detection uses **USDC Transfer event logs**, not `balanceOf`. This is critical for idempotency:
+
+- **`balanceOf` is a snapshot** — it can't distinguish a fresh payment from an old unswept balance. On restart, a deposit address with leftover USDC would look like a new payment and could trigger a double mint.
+- **Transfer events are specific and dedupable** — each has a unique tx hash, block number, and sender.
+
+How it works:
+1. When a mint request is created, `watchFromBlock` (current block) is persisted in state
+2. Payment monitor scans `Transfer(from, to=depositAddress)` events starting from `watchFromBlock`
+3. Only transfers with `amount >= expected` are considered
+4. The matching transfer's `txHash` is recorded in state as proof of payment — re-scanning the same block range is safe because the same txHash won't trigger a second mint
+5. Before calling `mintPod()`, a final `hasProcessed(tweetId)` check provides a cross-process safety net
+
+This means:
+- **Restarts are safe** — old transfers before `watchFromBlock` are ignored
+- **Re-scans are safe** — duplicate txHash detection prevents double-processing
+- **Cross-flow is safe** — file-based dedup catches ACP + mention collisions
+- `balanceOf` is only used in the sweep step (to confirm there's something to sweep)
 
 **Sweep caveat**: Deposit addresses need ETH for gas to transfer USDC out. The sweep function sends a tiny ETH amount (~0.0001) from the main wallet first, then transfers USDC back. Acceptable cost on Base.
 
@@ -117,8 +138,8 @@ Degen/crypto-native: uses crypto slang (gm, ser, fren, lfg, based, wagmi) natura
 
 ```
 mention → classify intent
-  ├── mint_request → derive address → PENDING_PAYMENT
-  │     ├── (USDC detected) → PAID → MINTING → SUBMITTING_METADATA → COMPLETED → reply + sweep
+  ├── mint_request → derive address, record watchFromBlock → PENDING_PAYMENT
+  │     ├── (Transfer event detected) → record txHash → PAID → MINTING → SUBMITTING_METADATA → COMPLETED → reply + sweep
   │     ├── (timeout 1hr) → EXPIRED → notify user
   │     └── (mint error) → FAILED → notify user
   ├── question → generate reply → reply
@@ -130,6 +151,21 @@ mention → classify intent
 State file: `.reppo-mention-state.json` — same patterns as `pending-jobs.ts` (in-memory Map + file locking + periodic persist).
 
 ```ts
+interface MentionRequest {
+  id: string;                         // unique request ID
+  mentionId: string;                  // tweet ID of the mention
+  tweetUrl: string;                   // tweet URL to mint
+  depositAddress: string;             // HD-derived deposit address
+  derivationIndex: number;            // HD derivation index
+  watchFromBlock: bigint;             // block number when request was created — only scan Transfer events after this
+  paymentTxHash?: string;             // Transfer event tx hash — proof of payment, prevents double-processing
+  buyerAddress?: string;              // sender from Transfer event
+  subnetId?: number;
+  status: MentionRequestStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface MentionListenerState {
   sinceId?: string;                   // resume from last seen mention
   lastPollAt?: string;

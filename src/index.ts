@@ -50,6 +50,64 @@ function createHealthServer(port: number) {
   return server;
 }
 
+function validateEnv() {
+  const required: Record<string, string> = {
+    PRIVATE_KEY: 'Wallet private key',
+    ACP_ENTITY_ID: 'ACP entity ID',
+    ACP_WALLET_ADDRESS: 'ACP wallet address',
+    REPPO_API_URL: 'Reppo API base URL',
+    TWITTER_API_KEY: 'X API consumer key',
+    TWITTER_API_SECRET: 'X API consumer secret',
+    TWITTER_ACCESS_TOKEN: 'X API access token',
+    TWITTER_ACCESS_TOKEN_SECRET: 'X API access token secret',
+  };
+
+  const optional: Record<string, string> = {
+    RPC_URL: 'Base RPC URL',
+    POLL_INTERVAL_MS: 'Poll interval (ms)',
+    ACP_TESTNET: 'Use testnet',
+    ACP_SIGNER_ENTITY_ID: 'Signer entity ID',
+    HEALTH_PORT: 'Health check port',
+    DATA_DIR: 'Data directory',
+    AWS_ACCESS_KEY_ID: 'AWS access key',
+    AWS_SECRET_ACCESS_KEY: 'AWS secret key',
+    DYNAMODB_ENDPOINT: 'DynamoDB endpoint',
+    AWS_REGION: 'AWS region',
+    LOG_LEVEL: 'Log level',
+  };
+
+  const secrets = new Set(['PRIVATE_KEY', 'TWITTER_API_SECRET', 'TWITTER_ACCESS_TOKEN_SECRET', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']);
+  const mask = (key: string, val: string) => secrets.has(key) ? val.slice(0, 4) + '***' : val;
+
+  const missing: string[] = [];
+
+  log.info('--- Environment check ---');
+  for (const [key, desc] of Object.entries(required)) {
+    const val = process.env[key];
+    if (val) {
+      log.info({ var: key, value: mask(key, val) }, `  ✓ ${desc}`);
+    } else {
+      missing.push(key);
+      log.error({ var: key }, `  ✗ ${desc} — MISSING`);
+    }
+  }
+
+  for (const [key, desc] of Object.entries(optional)) {
+    const val = process.env[key];
+    if (val) {
+      log.info({ var: key, value: mask(key, val) }, `  ✓ ${desc}`);
+    } else {
+      log.warn({ var: key }, `  - ${desc} (not set, using default)`);
+    }
+  }
+  log.info('--- End environment check ---');
+
+  if (missing.length > 0) {
+    log.fatal({ missing }, `Missing ${missing.length} required env var(s). Cannot start.`);
+    process.exit(1);
+  }
+}
+
 async function main() {
   // Register global error handlers first, before any async work
   process.on('uncaughtException', (err) => {
@@ -63,6 +121,9 @@ async function main() {
   });
 
   log.info('Starting Reppo ACP Agent...');
+
+  // Validate env vars before anything else
+  validateEnv();
 
   // Load and validate config
   const config = loadConfig();

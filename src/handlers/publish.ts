@@ -471,7 +471,11 @@ export async function retryPendingJobs(
         if (age > ACCEPTED_MAX_AGE_MS) {
           log.info({ jobId: pj.jobId }, 'Accepted job older than 24h, rejecting');
           if (acpContext) {
-            await rejectJobById(acpContext.client, pj.jobId, 'Job expired (accepted over 24h ago)');
+            const rejected = await rejectJobById(acpContext.client, pj.jobId, 'Job expired (accepted over 24h ago)');
+            if (!rejected) {
+              log.error({ jobId: pj.jobId }, 'Failed to reject expired job on-chain — keeping in pending for retry');
+              continue;
+            }
           }
           await removePendingJob(pj.jobId);
           continue;
@@ -482,9 +486,14 @@ export async function retryPendingJobs(
         if (hasProcessed(tweetId)) {
           log.warn({ jobId: pj.jobId, tweetId }, 'Tweet already processed, rejecting job');
           if (acpContext) {
-            await rejectJobById(acpContext.client, pj.jobId, `Tweet ${tweetId} already processed`);
+            const rejected = await rejectJobById(acpContext.client, pj.jobId, `Tweet ${tweetId} already processed`);
+            if (!rejected) {
+              log.error({ jobId: pj.jobId }, 'Failed to reject duplicate job on-chain — keeping in pending for retry');
+              continue;
+            }
           } else {
-            log.warn({ jobId: pj.jobId }, 'No ACP context available to reject job — buyer will not be refunded');
+            log.error({ jobId: pj.jobId }, 'No ACP context to reject job — keeping in pending for retry');
+            continue;
           }
           await removePendingJob(pj.jobId);
           continue;

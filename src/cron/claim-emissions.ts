@@ -18,6 +18,19 @@ import type { Clients } from '../types.js';
 const log = createLogger('claim-emissions');
 const dryRun = process.argv.includes('--dry-run');
 
+class ZeroVotesError extends Error {
+  constructor(podId: number, epoch: number) {
+    super(`ZeroVotes for pod ${podId} epoch ${epoch}`);
+    this.name = 'ZeroVotesError';
+  }
+}
+
+function isZeroVotesError(err: unknown): boolean {
+  if (err instanceof ZeroVotesError) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('0xcdad98fd') || msg.includes('ZeroVotes');
+}
+
 async function getInitTimestamp(clients: Clients): Promise<bigint> {
   return withRetry(
     async () =>
@@ -31,6 +44,13 @@ async function getInitTimestamp(clients: Clients): Promise<bigint> {
   );
 }
 
+function getEpochForTimestamp(initTimestamp: bigint, isoDate: string): number {
+  const ts = BigInt(Math.floor(new Date(isoDate).getTime() / 1000));
+  const elapsed = ts - initTimestamp;
+  if (elapsed <= 0n) return 0;
+  return Number(elapsed / BigInt(EPOCH_DURATION));
+}
+
 function getCurrentEpoch(initTimestamp: bigint): number {
   const now = BigInt(Math.floor(Date.now() / 1000));
   const elapsed = now - initTimestamp;
@@ -39,16 +59,25 @@ function getCurrentEpoch(initTimestamp: bigint): number {
 }
 
 async function getPodEmissions(clients: Clients, podId: number, epoch: number): Promise<bigint> {
+  // Don't retry ZeroVotes — it's a definitive "no votes" response, not transient
   return withRetry(
-    async () =>
-      (await clients.publicClient.readContract({
-        address: POD_CONTRACT,
-        abi: POD_ABI,
-        functionName: 'getPodEmissionsOfEpoch',
-        args: [BigInt(podId), BigInt(epoch)],
-      })) as bigint,
+    async () => {
+      try {
+        return (await clients.publicClient.readContract({
+          address: POD_CONTRACT,
+          abi: POD_ABI,
+          functionName: 'getPodEmissionsOfEpoch',
+          args: [BigInt(podId), BigInt(epoch)],
+        })) as bigint;
+      } catch (err) {
+        if (isZeroVotesError(err)) {
+          throw new ZeroVotesError(podId, epoch); // will NOT be retried
+        }
+        throw err;
+      }
+    },
     `getPodEmissions(${podId},${epoch})`,
-    { shouldRetry: isRetryableError },
+    { shouldRetry: (err) => !isZeroVotesError(err) && isRetryableError(err) },
   );
 }
 
@@ -168,15 +197,24 @@ async function main() {
   const buyerTotals = new Map<string, { amount: bigint; podIds: number[] }>();
 
   for (const pod of pods) {
-    const { podId, buyerWallet } = pod;
-    log.info({ podId, buyerWallet }, 'Checking pod emissions');
+    const { podId, buyerWallet, createdAt } = pod;
 
-    // Figure out which epochs to claim for this pod.
-    // We scan backwards from maxClaimableEpoch until we find already-claimed or zero-vote epochs.
+    // Calculate the epoch when this pod was minted — no emissions possible before this
+    const mintEpoch = getEpochForTimestamp(initTimestamp, createdAt);
+
+    // If pod was minted in the current or future epoch, no completed epochs to claim
+    if (mintEpoch > maxClaimableEpoch) {
+      log.info({ podId, buyerWallet, mintEpoch, maxClaimableEpoch }, 'Pod too new, no completed epochs to claim');
+      continue;
+    }
+
+    log.info({ podId, buyerWallet, mintEpoch, scanRange: `${maxClaimableEpoch}→${mintEpoch}` }, 'Checking pod emissions');
+
     let totalClaimed = 0n;
     let claimedAnyEpoch = false;
 
-    for (let epoch = maxClaimableEpoch; epoch >= 0; epoch--) {
+    // Only scan from maxClaimableEpoch down to the pod's mint epoch
+    for (let epoch = maxClaimableEpoch; epoch >= mintEpoch; epoch--) {
       try {
         const alreadyClaimed = await hasClaimed(clients, podId, epoch);
         if (alreadyClaimed) {
@@ -188,9 +226,7 @@ async function main() {
         try {
           emissions = await getPodEmissions(clients, podId, epoch);
         } catch (err) {
-          // ZeroVotes() revert means no emissions for this epoch
-          const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes('0xcdad98fd') || msg.includes('ZeroVotes')) {
+          if (isZeroVotesError(err)) {
             log.debug({ podId, epoch }, 'Zero votes, skipping');
             continue;
           }

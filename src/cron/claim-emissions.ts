@@ -67,7 +67,7 @@ async function getPodEmissions(clients: Clients, podId: number, epoch: number): 
           address: POD_CONTRACT,
           abi: POD_ABI,
           functionName: 'getPodEmissionsOfEpoch',
-          args: [BigInt(podId), BigInt(epoch)],
+          args: [BigInt(epoch), BigInt(podId)],
         })) as bigint;
       } catch (err) {
         if (isZeroVotesError(err)) {
@@ -88,7 +88,7 @@ async function hasClaimed(clients: Clients, podId: number, epoch: number): Promi
         address: POD_CONTRACT,
         abi: POD_ABI,
         functionName: 'hasPodOwnerClaimedEmissions',
-        args: [BigInt(podId), BigInt(epoch)],
+        args: [BigInt(epoch), BigInt(podId)],
       })) as boolean,
     `hasClaimed(${podId},${epoch})`,
     { shouldRetry: isRetryableError },
@@ -103,7 +103,7 @@ async function claimPodOwnerEmissions(clients: Clients, podId: number, epoch: nu
       address: POD_CONTRACT,
       abi: POD_ABI,
       functionName: 'claimPodOwnerEmissions',
-      args: [BigInt(podId), BigInt(epoch)],
+      args: [BigInt(epoch), BigInt(podId)],
       chain: base,
       account,
     }),

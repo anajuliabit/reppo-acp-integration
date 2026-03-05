@@ -24,9 +24,9 @@ export const POD_ABI = parseAbi([
   'function mintPod(address to, uint8 emissionSharePercent) returns (uint256 podId)',
   'function publishingFee() view returns (uint256)',
   'function initialisedTimestamp() view returns (uint256)',
-  'function claimPodOwnerEmissions(uint256 podId, uint256 epoch)',
-  'function getPodEmissionsOfEpoch(uint256 podId, uint256 epoch) view returns (uint256)',
-  'function hasPodOwnerClaimedEmissions(uint256 podId, uint256 epoch) view returns (bool)',
+  'function claimPodOwnerEmissions(uint256 epoch, uint256 podId)',
+  'function getPodEmissionsOfEpoch(uint256 epoch, uint256 podId) view returns (uint256)',
+  'function hasPodOwnerClaimedEmissions(uint256 epoch, uint256 podId) view returns (bool)',
   'function getEpochTotalVotes(uint256 epoch) view returns (uint256)',
   'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
 ]);

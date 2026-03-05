@@ -41,6 +41,10 @@ export interface PodRecord {
   createdAt: string;
   claimedAt?: string;
   claimedAmount?: number;
+  /** Last epoch for which emissions were claimed */
+  lastClaimedEpoch?: number;
+  /** Total REPPO emissions sent to buyer across all epochs */
+  totalEmissions?: number;
 }
 
 async function getDocClient(): Promise<DynamoDBDocumentClient> {
@@ -107,27 +111,40 @@ export async function getPodsByWallet(buyerWallet: string): Promise<PodRecord[]>
   return (result.Items ?? []) as PodRecord[];
 }
 
-export async function getUnclaimedPods(): Promise<PodRecord[]> {
+export async function getAllPods(): Promise<PodRecord[]> {
   const dc = await getDocClient();
   const result = await dc.send(new ScanCommand({
     TableName: TABLE_NAME,
-    FilterExpression: 'claimed = :false',
-    ExpressionAttributeValues: { ':false': false },
   }));
   return (result.Items ?? []) as PodRecord[];
 }
 
-export async function markPodClaimed(podId: number, amount: number): Promise<void> {
+/** @deprecated Use getAllPods — pods earn emissions every epoch, they're never permanently "claimed" */
+export async function getUnclaimedPods(): Promise<PodRecord[]> {
+  return getAllPods();
+}
+
+export async function updatePodEmissions(
+  podId: number,
+  lastClaimedEpoch: number,
+  emissionsThisRun: number,
+): Promise<void> {
   const dc = await getDocClient();
   await dc.send(new UpdateCommand({
     TableName: TABLE_NAME,
     Key: { podId },
-    UpdateExpression: 'SET claimed = :true, claimedAt = :at, claimedAmount = :amt',
+    UpdateExpression: 'SET lastClaimedEpoch = :epoch, claimedAt = :at, totalEmissions = if_not_exists(totalEmissions, :zero) + :amt',
     ExpressionAttributeValues: {
-      ':true': true,
+      ':epoch': lastClaimedEpoch,
       ':at': new Date().toISOString(),
-      ':amt': amount,
+      ':amt': emissionsThisRun,
+      ':zero': 0,
     },
   }));
-  log.info({ podId, amount }, 'Pod marked as claimed');
+  log.info({ podId, lastClaimedEpoch, emissionsThisRun }, 'Pod emissions updated');
+}
+
+/** @deprecated Use updatePodEmissions */
+export async function markPodClaimed(podId: number, amount: number): Promise<void> {
+  await updatePodEmissions(podId, 0, amount);
 }

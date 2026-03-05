@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { formatUnits, encodeFunctionData, createPublicClient, http, type Address, type Hash } from 'viem';
 import { base } from 'viem/chains';
 import { AcpContractClientV2, baseAcpConfigV2, baseSepoliaAcpConfigV2 } from '@virtuals-protocol/acp-node';
-import { initPods, getUnclaimedPods, markPodClaimed } from '../lib/pods.js';
+import { initPods, getAllPods, updatePodEmissions } from '../lib/pods.js';
 import { withRetry, isRetryableError } from '../lib/http.js';
 import { createLogger } from '../lib/logger.js';
 import {
@@ -97,6 +97,20 @@ async function hasClaimed(clients: CronClients, podId: number, epoch: number): P
         args: [BigInt(epoch), BigInt(podId)],
       })) as boolean,
     `hasClaimed(${podId},${epoch})`,
+    { shouldRetry: isRetryableError },
+  );
+}
+
+async function getReppoBalance(clients: CronClients): Promise<bigint> {
+  return withRetry(
+    async () =>
+      (await clients.publicClient.readContract({
+        address: REPPO_TOKEN,
+        abi: ERC20_ABI,
+        functionName: 'balanceOf',
+        args: [clients.aaWalletAddress],
+      })) as bigint,
+    'getReppoBalance',
     { shouldRetry: isRetryableError },
   );
 }
@@ -206,48 +220,54 @@ async function main() {
   const currentEpoch = getCurrentEpoch(initTimestamp);
   log.info({ initTimestamp: Number(initTimestamp), currentEpoch }, 'Epoch info');
 
-  // Only claim completed epochs (not the current in-progress one)
-  const maxClaimableEpoch = currentEpoch - 1;
+  // Contract requires epoch + 2 <= latestEpoch, so max claimable = currentEpoch - 2
+  const maxClaimableEpoch = currentEpoch - 2;
   if (maxClaimableEpoch < 0) {
-    log.info('No completed epochs yet, nothing to claim');
+    log.info('No claimable epochs yet');
     return;
   }
 
-  const pods = await getUnclaimedPods();
+  const pods = await getAllPods();
   if (pods.length === 0) {
-    log.info('No unclaimed pods found');
+    log.info('No pods found');
     return;
   }
 
-  log.info({ podCount: pods.length, maxClaimableEpoch }, 'Processing unclaimed pods');
+  log.info({ podCount: pods.length, maxClaimableEpoch }, 'Processing pods');
 
-  // Group claims by buyer wallet so we can batch-transfer
-  const buyerTotals = new Map<string, { amount: bigint; podIds: number[] }>();
-
+  // Process each pod: claim on-chain, then transfer to buyer and update DynamoDB
   for (const pod of pods) {
-    const { podId, buyerWallet, createdAt } = pod;
+    const { podId, buyerWallet, createdAt, lastClaimedEpoch } = pod;
 
-    // Calculate the epoch when this pod was minted — no emissions possible before this
     const mintEpoch = getEpochForTimestamp(initTimestamp, createdAt);
 
-    // If pod was minted in the current or future epoch, no completed epochs to claim
     if (mintEpoch > maxClaimableEpoch) {
-      log.info({ podId, buyerWallet, mintEpoch, maxClaimableEpoch }, 'Pod too new, no completed epochs to claim');
+      log.info({ podId, buyerWallet, mintEpoch, maxClaimableEpoch }, 'Pod too new, skipping');
       continue;
     }
 
-    log.info({ podId, buyerWallet, mintEpoch, scanRange: `${maxClaimableEpoch}→${mintEpoch}` }, 'Checking pod emissions');
+    // Start scanning from where we left off (or mint epoch if first run)
+    const startEpoch = lastClaimedEpoch != null ? lastClaimedEpoch + 1 : mintEpoch;
 
-    let totalClaimed = 0n;
-    let claimedAnyEpoch = false;
+    if (startEpoch > maxClaimableEpoch) {
+      log.debug({ podId, startEpoch, maxClaimableEpoch }, 'Already up to date');
+      continue;
+    }
 
-    // Only scan from maxClaimableEpoch down to the pod's mint epoch
-    for (let epoch = maxClaimableEpoch; epoch >= mintEpoch; epoch--) {
+    log.info({ podId, buyerWallet, scanRange: `${startEpoch}→${maxClaimableEpoch}` }, 'Checking pod emissions');
+
+    // Snapshot REPPO balance before claims for this pod
+    const balanceBefore = dryRun ? 0n : await getReppoBalance(clients);
+    let highestClaimedEpoch = lastClaimedEpoch ?? -1;
+    let claimedCount = 0;
+
+    for (let epoch = startEpoch; epoch <= maxClaimableEpoch; epoch++) {
       try {
         const alreadyClaimed = await hasClaimed(clients, podId, epoch);
         if (alreadyClaimed) {
-          log.debug({ podId, epoch }, 'Already claimed, stopping scan');
-          break;
+          // Already claimed on-chain (maybe manually), just update our tracking
+          highestClaimedEpoch = Math.max(highestClaimedEpoch, epoch);
+          continue;
         }
 
         let emissions: bigint;
@@ -266,46 +286,47 @@ async function main() {
           continue;
         }
 
-        log.info({ podId, epoch, emissions: formatUnits(emissions, 18) }, dryRun ? 'Would claim emissions (dry-run)' : 'Claiming emissions');
+        log.info({ podId, epoch, emissions: formatUnits(emissions, 18) }, dryRun ? 'Would claim (dry-run)' : 'Claiming');
         if (!dryRun) {
           await claimPodOwnerEmissions(clients, podId, epoch);
+          claimedCount++;
         }
-        totalClaimed += emissions;
-        claimedAnyEpoch = true;
+        highestClaimedEpoch = Math.max(highestClaimedEpoch, epoch);
       } catch (err) {
         log.error({ podId, epoch, error: err instanceof Error ? err.message : err }, 'Failed to claim epoch');
       }
     }
 
-    if (totalClaimed > 0n) {
-      const existing = buyerTotals.get(buyerWallet) ?? { amount: 0n, podIds: [] };
-      existing.amount += totalClaimed;
-      existing.podIds.push(podId);
-      buyerTotals.set(buyerWallet, existing);
-    }
-  }
+    // Calculate actual REPPO received by comparing balance
+    const balanceAfter = dryRun ? 0n : await getReppoBalance(clients);
+    const actualReceived = balanceAfter - balanceBefore;
 
-  // Transfer accumulated REPPO to each buyer, then mark pods as claimed
-  for (const [wallet, { amount, podIds }] of buyerTotals) {
     if (dryRun) {
-      log.info({ wallet, amount: formatUnits(amount, 18), podIds }, 'Would transfer to buyer (dry-run)');
+      if (highestClaimedEpoch > (lastClaimedEpoch ?? -1)) {
+        log.info({ podId, buyerWallet, highestClaimedEpoch }, 'Would update (dry-run)');
+      }
       continue;
     }
-    try {
-      log.info({ wallet, amount: formatUnits(amount, 18), podIds }, 'Transferring emissions to buyer');
-      const transferTx = await transferReppo(clients, wallet as Address, amount);
 
-      // Only mark claimed AFTER successful transfer
-      for (const podId of podIds) {
-        await markPodClaimed(podId, Number(formatUnits(amount / BigInt(podIds.length), 18)));
-        log.info({ podId, wallet, transferTx }, 'Pod marked as claimed');
+    if (actualReceived > 0n) {
+      // Transfer actual received amount to buyer
+      try {
+        log.info({ podId, buyerWallet, amount: formatUnits(actualReceived, 18), claimedCount }, 'Transferring emissions to buyer');
+        await transferReppo(clients, buyerWallet as Address, actualReceived);
+
+        // Update DynamoDB with actual amount and last epoch
+        await updatePodEmissions(podId, highestClaimedEpoch, Number(formatUnits(actualReceived, 18)));
+      } catch (err) {
+        log.error({ podId, buyerWallet, amount: formatUnits(actualReceived, 18), error: err instanceof Error ? err.message : err },
+          'Failed to transfer — will retry next run (on-chain claims succeeded but REPPO still in AA wallet)');
       }
-    } catch (err) {
-      log.error({ wallet, amount: formatUnits(amount, 18), podIds, error: err instanceof Error ? err.message : err }, 'Failed to transfer to buyer — pods NOT marked as claimed, will retry next run');
+    } else if (highestClaimedEpoch > (lastClaimedEpoch ?? -1)) {
+      // No REPPO received but we scanned new epochs — update tracking
+      await updatePodEmissions(podId, highestClaimedEpoch, 0);
     }
   }
 
-  log.info({ buyersProcessed: buyerTotals.size, podsProcessed: pods.length }, 'Emissions claim cron complete');
+  log.info({ podsProcessed: pods.length }, 'Emissions claim cron complete');
 }
 
 main().catch((err) => {

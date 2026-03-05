@@ -18,14 +18,22 @@ export const RETRY_BASE_DELAY = 1000; // 1 second
 // Pool fee tiers to try (in order of preference)
 export const POOL_FEE_TIERS = [3000, 10000, 500] as const; // 0.3%, 1%, 0.05%
 
+export const EPOCH_DURATION = 2 * 24 * 60 * 60; // 2 days in seconds
+
 export const POD_ABI = parseAbi([
   'function mintPod(address to, uint8 emissionSharePercent) returns (uint256 podId)',
   'function publishingFee() view returns (uint256)',
+  'function initialisedTimestamp() view returns (uint256)',
+  'function claimPodOwnerEmissions(uint256 podId, uint256 epoch)',
+  'function getPodEmissionsOfEpoch(uint256 podId, uint256 epoch) view returns (uint256)',
+  'function hasPodOwnerClaimedEmissions(uint256 podId, uint256 epoch) view returns (bool)',
+  'function getEpochTotalVotes(uint256 epoch) view returns (uint256)',
   'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
 ]);
 
 export const ERC20_ABI = parseAbi([
   'function approve(address spender, uint256 amount) returns (bool)',
+  'function transfer(address to, uint256 amount) returns (bool)',
   'function balanceOf(address account) view returns (uint256)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function decimals() view returns (uint8)',

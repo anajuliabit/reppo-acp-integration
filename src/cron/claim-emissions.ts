@@ -16,6 +16,7 @@ import {
 import type { Clients } from '../types.js';
 
 const log = createLogger('claim-emissions');
+const dryRun = process.argv.includes('--dry-run');
 
 async function getInitTimestamp(clients: Clients): Promise<bigint> {
   return withRetry(
@@ -124,7 +125,7 @@ async function transferReppo(clients: Clients, to: Address, amount: bigint): Pro
 }
 
 async function main() {
-  log.info('Starting emissions claim cron...');
+  log.info({ dryRun }, 'Starting emissions claim cron...');
 
   // Minimal config for this script
   const privateKey = process.env.PRIVATE_KEY;
@@ -201,8 +202,10 @@ async function main() {
           continue;
         }
 
-        log.info({ podId, epoch, emissions: formatUnits(emissions, 18) }, 'Claiming emissions');
-        await claimPodOwnerEmissions(clients, podId, epoch);
+        log.info({ podId, epoch, emissions: formatUnits(emissions, 18) }, dryRun ? 'Would claim emissions (dry-run)' : 'Claiming emissions');
+        if (!dryRun) {
+          await claimPodOwnerEmissions(clients, podId, epoch);
+        }
         totalClaimed += emissions;
         claimedAnyEpoch = true;
       } catch (err) {
@@ -216,19 +219,25 @@ async function main() {
       existing.podIds.push(podId);
       buyerTotals.set(buyerWallet, existing);
     }
-
-    if (claimedAnyEpoch) {
-      await markPodClaimed(podId, Number(formatUnits(totalClaimed, 18)));
-    }
   }
 
-  // Transfer accumulated REPPO to each buyer
+  // Transfer accumulated REPPO to each buyer, then mark pods as claimed
   for (const [wallet, { amount, podIds }] of buyerTotals) {
+    if (dryRun) {
+      log.info({ wallet, amount: formatUnits(amount, 18), podIds }, 'Would transfer to buyer (dry-run)');
+      continue;
+    }
     try {
       log.info({ wallet, amount: formatUnits(amount, 18), podIds }, 'Transferring emissions to buyer');
-      await transferReppo(clients, wallet as Address, amount);
+      const transferTx = await transferReppo(clients, wallet as Address, amount);
+
+      // Only mark claimed AFTER successful transfer
+      for (const podId of podIds) {
+        await markPodClaimed(podId, Number(formatUnits(amount / BigInt(podIds.length), 18)));
+        log.info({ podId, wallet, transferTx }, 'Pod marked as claimed');
+      }
     } catch (err) {
-      log.error({ wallet, amount: formatUnits(amount, 18), error: err instanceof Error ? err.message : err }, 'Failed to transfer to buyer');
+      log.error({ wallet, amount: formatUnits(amount, 18), podIds, error: err instanceof Error ? err.message : err }, 'Failed to transfer to buyer — pods NOT marked as claimed, will retry next run');
     }
   }
 

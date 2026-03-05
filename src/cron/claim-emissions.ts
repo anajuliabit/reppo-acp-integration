@@ -107,7 +107,7 @@ async function claimPodOwnerEmissions(clients: CronClients, podId: number, epoch
   const data = encodeFunctionData({
     abi: POD_ABI,
     functionName: 'claimPodOwnerEmissions',
-    args: [BigInt(epoch), BigInt(podId)],
+    args: [BigInt(podId), BigInt(epoch)],
   });
 
   const tx = await withRetry(
